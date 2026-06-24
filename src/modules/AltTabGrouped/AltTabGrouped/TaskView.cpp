@@ -4,7 +4,7 @@
 
 #include <windowsx.h>
 #include <climits>
-#include <cstdlib>
+#include <algorithm>
 #include <gdiplus.h>
 
 #pragma comment(lib, "dwmapi.lib")
@@ -16,43 +16,66 @@ namespace
 {
     const wchar_t TaskViewClassName[] = L"PowerToys_AltTabGrouped_TaskView";
 
-    constexpr int Margin = 56;
-    constexpr int GridTop = 44;
-    constexpr int TileW = 300;
+    constexpr int Margin = 48;
+    constexpr int GridTop = 40;
     constexpr int TitleBar = 30;
-    constexpr int TileGap = 22;
-    constexpr int HeaderH = 38;
-    constexpr int HeaderGapAbove = 16;
-    constexpr int HeaderGapBelow = 6;
-    constexpr int GroupGap = 30;
-    constexpr int StripH = 156;
-    constexpr int DeskW = 200;
-    constexpr int DeskH = 112;
-    constexpr int DeskGap = 18;
+    constexpr int StripH = 172;
+    constexpr int StackOff = 8; // per-card stack offset
+    constexpr int MaxStack = 2; // max peeking back cards
     constexpr int CloseSize = 22;
+    constexpr int DeskW = 214;
+    constexpr int DeskH = 120;
+    constexpr int DeskGap = 20;
+    constexpr int GroupIcon = 26; // larger app icon per group
 
-    int TileH() { return TitleBar + (TileW * 9) / 16; }
-
+    void AddRound(GraphicsPath& path, int x, int y, int w, int h, int r)
+    {
+        if (w < 2 * r) r = w / 2;
+        if (h < 2 * r) r = h / 2;
+        path.Reset();
+        path.AddArc(x, y, r, r, 180, 90);
+        path.AddArc(x + w - r, y, r, r, 270, 90);
+        path.AddArc(x + w - r, y + h - r, r, r, 0, 90);
+        path.AddArc(x, y + h - r, r, r, 90, 90);
+        path.CloseFigure();
+    }
     void FillRound(Graphics& g, Brush& b, int x, int y, int w, int h, int r)
     {
-        GraphicsPath path;
-        path.AddArc(x, y, r, r, 180, 90);
-        path.AddArc(x + w - r, y, r, r, 270, 90);
-        path.AddArc(x + w - r, y + h - r, r, r, 0, 90);
-        path.AddArc(x, y + h - r, r, r, 90, 90);
-        path.CloseFigure();
-        g.FillPath(&b, &path);
+        GraphicsPath p;
+        AddRound(p, x, y, w, h, r);
+        g.FillPath(&b, &p);
+    }
+    void StrokeRound(Graphics& g, Pen& pen, int x, int y, int w, int h, int r)
+    {
+        GraphicsPath p;
+        AddRound(p, x, y, w, h, r);
+        g.DrawPath(&pen, &p);
     }
 
-    void DrawRoundBorder(Graphics& g, Pen& p, int x, int y, int w, int h, int r)
+    int NearestInDirection(const std::vector<RECT>& rects, int cur, int dx, int dy)
     {
-        GraphicsPath path;
-        path.AddArc(x, y, r, r, 180, 90);
-        path.AddArc(x + w - r, y, r, r, 270, 90);
-        path.AddArc(x + w - r, y + h - r, r, r, 0, 90);
-        path.AddArc(x, y + h - r, r, r, 90, 90);
-        path.CloseFigure();
-        g.DrawPath(&p, &path);
+        if (cur < 0 || cur >= static_cast<int>(rects.size()))
+        {
+            return cur;
+        }
+        const RECT c = rects[cur];
+        const int ccx = (c.left + c.right) / 2, ccy = (c.top + c.bottom) / 2;
+        int best = cur, bestScore = INT_MAX;
+        for (int i = 0; i < static_cast<int>(rects.size()); ++i)
+        {
+            if (i == cur) continue;
+            const RECT r = rects[i];
+            const int cx = (r.left + r.right) / 2, cy = (r.top + r.bottom) / 2;
+            if (dx > 0 && cx <= ccx) continue;
+            if (dx < 0 && cx >= ccx) continue;
+            if (dy > 0 && cy <= ccy) continue;
+            if (dy < 0 && cy >= ccy) continue;
+            const int primary = dx != 0 ? abs(cx - ccx) : abs(cy - ccy);
+            const int secondary = dx != 0 ? abs(cy - ccy) : abs(cx - ccx);
+            const int score = primary + secondary * 3;
+            if (score < bestScore) { bestScore = score; best = i; }
+        }
+        return best;
     }
 }
 
@@ -67,16 +90,13 @@ bool TaskView::Initialize(HINSTANCE hinstance)
     wc.lpszClassName = TaskViewClassName;
     RegisterClassExW(&wc);
 
-    m_hwnd = CreateWindowExW(
-        WS_EX_TOPMOST | WS_EX_LAYERED,
-        TaskViewClassName, L"", WS_POPUP,
-        0, 0, 100, 100, nullptr, nullptr, hinstance, this);
+    m_hwnd = CreateWindowExW(WS_EX_TOPMOST | WS_EX_LAYERED, TaskViewClassName, L"", WS_POPUP,
+                             0, 0, 100, 100, nullptr, nullptr, hinstance, this);
     if (!m_hwnd)
     {
         return false;
     }
-    // Uniform translucency so the desktop shows faintly behind the grid.
-    SetLayeredWindowAttributes(m_hwnd, 0, 238, LWA_ALPHA);
+    SetLayeredWindowAttributes(m_hwnd, 0, 240, LWA_ALPHA);
     return true;
 }
 
@@ -94,14 +114,7 @@ LRESULT CALLBACK TaskView::WndProcStatic(HWND hwnd, UINT msg, WPARAM wParam, LPA
 
 void TaskView::Toggle()
 {
-    if (m_visible)
-    {
-        Close();
-    }
-    else
-    {
-        Open();
-    }
+    m_visible ? Close() : Open();
 }
 
 void TaskView::Open()
@@ -112,24 +125,25 @@ void TaskView::Open()
     m_monitor = mi.rcMonitor;
 
     BuildModel();
-    if (m_tiles.empty())
+    if (m_cells.empty())
     {
         m_groups.clear();
         return;
     }
 
-    m_scrollY = 0;
-    m_selected = 0;
-    m_hot = m_hotClose = m_hotDesktop = -1;
+    m_expandedGroup = -1;
+    m_selCell = 0;
+    m_selSub = 0;
+    m_hotCell = m_hotSub = m_hotClose = m_hotDesktop = -1;
 
     const int mw = m_monitor.right - m_monitor.left;
     const int mh = m_monitor.bottom - m_monitor.top;
-    SetWindowPos(m_hwnd, HWND_TOPMOST, m_monitor.left, m_monitor.top, mw, mh, SWP_NOACTIVATE | SWP_SHOWWINDOW);
-    Layout();
+    m_gridBottom = mh - StripH - 8;
 
+    SetWindowPos(m_hwnd, HWND_TOPMOST, m_monitor.left, m_monitor.top, mw, mh, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    LayoutGroups();
     ShowWindow(m_hwnd, SW_SHOW);
 
-    // Force foreground so we receive keyboard input.
     DWORD fg = GetWindowThreadProcessId(GetForegroundWindow(), nullptr);
     DWORD me = GetCurrentThreadId();
     AttachThreadInput(me, fg, TRUE);
@@ -144,127 +158,159 @@ void TaskView::Open()
 
 void TaskView::Close()
 {
-    if (!m_visible)
-    {
-        return;
-    }
+    if (!m_visible) return;
     m_visible = false;
     UnregisterThumbnails();
     ShowWindow(m_hwnd, SW_HIDE);
     m_groups.clear();
-    m_tiles.clear();
-    m_headers.clear();
+    m_cells.clear();
+    m_thumbs.clear();
     m_desktops.clear();
+    m_subRects.clear();
+    m_expandedGroup = -1;
 }
 
 void TaskView::BuildModel()
 {
     m_groups = AppGrouping::Group(WindowEnumerator::Enumerate());
 
-    m_tiles.clear();
-    m_headers.clear();
+    m_cells.clear();
+    m_thumbs.clear();
     for (int gi = 0; gi < static_cast<int>(m_groups.size()); ++gi)
     {
-        Header h{};
-        h.name = m_groups[gi].name;
-        h.icon = m_groups[gi].icon;
-        h.count = m_groups[gi].windows.size();
-        m_headers.push_back(h);
-
-        for (const auto& win : m_groups[gi].windows)
+        m_cells.push_back(Cell{ gi, {} });
+        for (int wi = 0; wi < static_cast<int>(m_groups[gi].windows.size()); ++wi)
         {
-            Tile t{};
-            t.hwnd = win.hwnd;
-            t.title = win.title;
-            t.icon = win.icon;
-            t.group = gi;
-            m_tiles.push_back(t);
+            m_thumbs.push_back(Thumb{ m_groups[gi].windows[wi].hwnd, gi, wi, nullptr });
         }
     }
 
+    // Desktops + wallpaper previews.
     m_desktops.clear();
     int current = 0;
     auto desks = VirtualDesktops::Enumerate(current);
     m_currentDesktop = current;
     for (int i = 0; i < static_cast<int>(desks.size()); ++i)
     {
-        m_desktops.push_back(DesktopTile{ desks[i].name, desks[i].isCurrent, false, i, {} });
+        DesktopTile t{};
+        t.name = desks[i].name;
+        t.isCurrent = desks[i].isCurrent;
+        t.index = i;
+        if (!desks[i].wallpaperPath.empty())
+        {
+            auto* img = Image::FromFile(desks[i].wallpaperPath.c_str());
+            if (img && img->GetLastStatus() == Ok)
+            {
+                t.wallpaper = std::shared_ptr<Image>(img);
+            }
+            else
+            {
+                delete img;
+            }
+        }
+        m_desktops.push_back(std::move(t));
     }
-    m_desktops.push_back(DesktopTile{ L"New desktop", false, true, static_cast<int>(desks.size()), {} });
+    m_desktops.push_back(DesktopTile{ L"New desktop", false, true, static_cast<int>(desks.size()), {}, nullptr });
 }
 
-void TaskView::Layout()
+std::vector<RECT> TaskView::FluidGrid(int count, RECT area, int titleBar) const
+{
+    std::vector<RECT> rects;
+    if (count <= 0) return rects;
+    const int aw = area.right - area.left;
+    const int ah = area.bottom - area.top;
+    const int gap = 18;
+    const double aspect = 0.56; // body height relative to width
+
+    int bestCols = 1;
+    double bestArea = -1.0;
+    for (int cols = 1; cols <= count; ++cols)
+    {
+        const int rows = (count + cols - 1) / cols;
+        double cellW = static_cast<double>(aw - (cols + 1) * gap) / cols;
+        if (cellW < 70) continue;
+        double cellH = cellW * aspect + titleBar;
+        const double needed = rows * cellH + (rows + 1) * gap;
+        double scale = 1.0;
+        if (needed > ah)
+        {
+            scale = static_cast<double>(ah - (rows + 1) * gap) / (rows * cellH);
+            if (scale <= 0.05) continue;
+        }
+        const double a = (cellW * scale) * (cellH * scale);
+        if (a > bestArea) { bestArea = a; bestCols = cols; }
+    }
+
+    const int cols = bestCols;
+    const int rows = (count + cols - 1) / cols;
+    double cellW = static_cast<double>(aw - (cols + 1) * gap) / cols;
+    double cellH = cellW * aspect + titleBar;
+    const double needed = rows * cellH + (rows + 1) * gap;
+    const double scale = needed > ah ? static_cast<double>(ah - (rows + 1) * gap) / (rows * cellH) : 1.0;
+    cellW *= scale;
+    cellH *= scale;
+    const int cw = static_cast<int>(cellW);
+    const int ch = static_cast<int>(cellH);
+
+    const int totalH = rows * ch + (rows + 1) * gap;
+    const int startY = area.top + (ah - totalH) / 2 + gap;
+    for (int r = 0; r < rows; ++r)
+    {
+        const int itemsThisRow = std::min(cols, count - r * cols);
+        const int rowW = itemsThisRow * cw + (itemsThisRow - 1) * gap;
+        const int startX = area.left + (aw - rowW) / 2;
+        for (int c = 0; c < itemsThisRow; ++c)
+        {
+            const int x = startX + c * (cw + gap);
+            const int y = startY + r * (ch + gap);
+            rects.push_back(RECT{ x, y, x + cw, y + ch });
+        }
+    }
+    return rects;
+}
+
+void TaskView::LayoutGroups()
 {
     const int mw = m_monitor.right - m_monitor.left;
-    const int mh = m_monitor.bottom - m_monitor.top;
-    const int stripTop = mh - StripH;
-    m_gridBottom = stripTop - 14;
-
-    const int contentLeft = Margin;
-    const int contentRight = mw - Margin;
-    const int contentWidth = contentRight - contentLeft;
-    const int cols = (contentWidth + TileGap) / (TileW + TileGap);
-    const int columns = cols < 1 ? 1 : cols;
-    const int tileH = TileH();
-
-    int y = GridTop;
-    size_t tileIdx = 0;
-    for (int gi = 0; gi < static_cast<int>(m_groups.size()); ++gi)
+    RECT area{ Margin, GridTop, mw - Margin, m_gridBottom };
+    auto rects = FluidGrid(static_cast<int>(m_cells.size()), area, TitleBar);
+    for (size_t i = 0; i < m_cells.size() && i < rects.size(); ++i)
     {
-        y += HeaderGapAbove;
-        m_headers[gi].rect = { contentLeft, y, contentRight, y + HeaderH };
-        y += HeaderH + HeaderGapBelow;
-
-        const int n = static_cast<int>(m_groups[gi].windows.size());
-        for (int i = 0; i < n; ++i)
-        {
-            const int col = i % columns;
-            const int row = i / columns;
-            const int tx = contentLeft + col * (TileW + TileGap);
-            const int ty = y + row * (tileH + TileGap);
-            m_tiles[tileIdx].rect = { tx, ty, tx + TileW, ty + tileH };
-            ++tileIdx;
-        }
-        const int rows = (n + columns - 1) / columns;
-        y += rows * (tileH + TileGap) + GroupGap;
+        m_cells[i].rect = rects[i];
     }
-    m_contentHeight = y;
 
-    // Desktop strip (fixed, screen/client coords).
+    // Desktop strip.
+    const int stripTop = (m_monitor.bottom - m_monitor.top) - StripH;
     const int total = static_cast<int>(m_desktops.size());
     const int stripWidth = total * DeskW + (total - 1) * DeskGap;
-    int dx = (mw - stripWidth) / 2;
-    if (dx < Margin)
-    {
-        dx = Margin;
-    }
+    int dx = std::max(Margin, (mw - stripWidth) / 2);
     const int dy = stripTop + (StripH - (DeskH + 26)) / 2;
     for (auto& d : m_desktops)
     {
         d.rect = { dx, dy, dx + DeskW, dy + DeskH };
         dx += DeskW + DeskGap;
     }
-
-    ClampScroll();
 }
 
-void TaskView::ClampScroll()
+void TaskView::LayoutExpanded()
 {
-    const int viewport = m_gridBottom - GridTop;
-    const int maxScroll = (m_contentHeight - GridTop) > viewport ? (m_contentHeight - GridTop - viewport) : 0;
-    if (m_scrollY < 0)
-    {
-        m_scrollY = 0;
-    }
-    if (m_scrollY > maxScroll)
-    {
-        m_scrollY = maxScroll;
-    }
+    const int mw = m_monitor.right - m_monitor.left;
+    RECT grid{ Margin, GridTop, mw - Margin, m_gridBottom };
+    const int insetX = (grid.right - grid.left) / 10;
+    const int insetY = (grid.bottom - grid.top) / 12;
+    m_expandArea = { grid.left + insetX, grid.top + insetY, grid.right - insetX, grid.bottom - insetY };
+    const int n = (m_expandedGroup >= 0) ? static_cast<int>(m_groups[m_expandedGroup].windows.size()) : 0;
+    m_subRects = FluidGrid(n, m_expandArea, TitleBar);
+}
+
+RECT TaskView::CellBody(const RECT& front) const
+{
+    return { front.left + 4, front.top + TitleBar, front.right - 4, front.bottom - 4 };
 }
 
 void TaskView::RegisterThumbnails()
 {
-    for (auto& t : m_tiles)
+    for (auto& t : m_thumbs)
     {
         if (FAILED(DwmRegisterThumbnail(m_hwnd, t.hwnd, &t.thumb)))
         {
@@ -276,31 +322,42 @@ void TaskView::RegisterThumbnails()
 
 void TaskView::UpdateThumbnails()
 {
-    for (auto& t : m_tiles)
+    for (auto& t : m_thumbs)
     {
-        if (!t.thumb)
+        if (!t.thumb) continue;
+        RECT dest{};
+        bool visible = false;
+        if (m_expandedGroup < 0)
         {
-            continue;
+            // Group view: only each group's front (most-recent) window shows.
+            if (t.indexInGroup == 0 && t.group < static_cast<int>(m_cells.size()))
+            {
+                const RECT cell = m_cells[t.group].rect;
+                const int depth = std::min(static_cast<int>(m_groups[t.group].windows.size()) - 1, MaxStack);
+                const RECT front{ cell.left, cell.top + depth * StackOff, cell.right - depth * StackOff, cell.bottom };
+                dest = CellBody(front);
+                visible = true;
+            }
         }
-        const int top = t.rect.top - m_scrollY + TitleBar;
-        const int bottom = t.rect.bottom - m_scrollY - 3;
-        const int clientTop = t.rect.top - m_scrollY;
-        const int clientBottom = t.rect.bottom - m_scrollY;
-        const bool visible = clientTop >= GridTop - 1 && clientBottom <= m_gridBottom + 1;
+        else if (t.group == m_expandedGroup && t.indexInGroup < static_cast<int>(m_subRects.size()))
+        {
+            dest = CellBody(m_subRects[t.indexInGroup]);
+            visible = true;
+        }
 
         DWM_THUMBNAIL_PROPERTIES props{};
         props.dwFlags = DWM_TNP_RECTDESTINATION | DWM_TNP_VISIBLE | DWM_TNP_OPACITY | DWM_TNP_SOURCECLIENTAREAONLY;
         props.fSourceClientAreaOnly = FALSE;
         props.opacity = 255;
         props.fVisible = visible ? TRUE : FALSE;
-        props.rcDestination = { t.rect.left + 3, top, t.rect.right - 3, bottom };
+        props.rcDestination = dest;
         DwmUpdateThumbnailProperties(t.thumb, &props);
     }
 }
 
 void TaskView::UnregisterThumbnails()
 {
-    for (auto& t : m_tiles)
+    for (auto& t : m_thumbs)
     {
         if (t.thumb)
         {
@@ -314,12 +371,8 @@ void TaskView::Render()
 {
     RECT rc;
     GetClientRect(m_hwnd, &rc);
-    const int w = rc.right;
-    const int h = rc.bottom;
-    if (w <= 0 || h <= 0)
-    {
-        return;
-    }
+    const int w = rc.right, h = rc.bottom;
+    if (w <= 0 || h <= 0) return;
 
     HDC screen = GetDC(m_hwnd);
     HDC dc = CreateCompatibleDC(screen);
@@ -331,122 +384,157 @@ void TaskView::Render()
         g.SetSmoothingMode(SmoothingModeAntiAlias);
         g.SetTextRenderingHint(TextRenderingHintClearTypeGridFit);
 
-        SolidBrush bg(Color(255, 24, 24, 28));
+        SolidBrush bg(Color(255, 22, 22, 26));
         g.FillRectangle(&bg, 0, 0, w, h);
 
         FontFamily fam(L"Segoe UI");
-        Font headerFont(&fam, 15, FontStyleBold, UnitPixel);
+        Font nameFont(&fam, 13, FontStyleBold, UnitPixel);
         Font titleFont(&fam, 12, FontStyleRegular, UnitPixel);
         Font deskFont(&fam, 13, FontStyleRegular, UnitPixel);
         SolidBrush white(Color(255, 240, 240, 240));
-        SolidBrush dim(Color(255, 165, 165, 172));
-        SolidBrush titleBarBrush(Color(255, 44, 44, 52));
-        SolidBrush tileBodyBrush(Color(255, 32, 32, 38));
-        SolidBrush accent(Color(255, 0, 120, 215));
-        SolidBrush closeHotBrush(Color(255, 200, 60, 60));
-        Pen accentPen(Color(255, 0, 120, 215), 2.0f);
-        Pen deskPen(Color(255, 90, 90, 100), 1.0f);
+        SolidBrush dim(Color(255, 170, 170, 178));
+        SolidBrush cardBack(Color(255, 46, 46, 54));
+        SolidBrush cardBack2(Color(255, 38, 38, 45));
+        SolidBrush titleBg(Color(255, 52, 52, 62));
+        SolidBrush bodyBg(Color(255, 30, 30, 36));
+        SolidBrush badge(Color(255, 0, 120, 215));
+        SolidBrush closeHot(Color(255, 200, 60, 60));
+        Pen accent(Color(255, 0, 120, 215), 2.5f);
+        Pen hotPen(Color(255, 150, 150, 162), 2.0f);
         StringFormat sf;
         sf.SetLineAlignment(StringAlignmentCenter);
         sf.SetTrimming(StringTrimmingEllipsisCharacter);
         sf.SetFormatFlags(StringFormatFlagsNoWrap);
+        StringFormat center;
+        center.SetAlignment(StringAlignmentCenter);
+        center.SetLineAlignment(StringAlignmentCenter);
+        center.SetTrimming(StringTrimmingEllipsisCharacter);
+        center.SetFormatFlags(StringFormatFlagsNoWrap);
 
-        // Clip the grid region so scrolled content doesn't bleed into the strip.
-        g.SetClip(Rect(0, GridTop - 2, w, m_gridBottom - GridTop + 4));
-
-        for (int gi = 0; gi < static_cast<int>(m_headers.size()); ++gi)
+        // ---- Group stacks ----
+        for (int i = 0; i < static_cast<int>(m_cells.size()); ++i)
         {
-            const Header& hd = m_headers[gi];
-            const int hy = hd.rect.top - m_scrollY;
-            if (hy + HeaderH >= GridTop && hy <= m_gridBottom)
+            const AppGroup& grp = m_groups[m_cells[i].group];
+            const RECT cell = m_cells[i].rect;
+            const int count = static_cast<int>(grp.windows.size());
+            const int depth = std::min(count - 1, MaxStack);
+            const RECT front{ cell.left, cell.top + depth * StackOff, cell.right - depth * StackOff, cell.bottom };
+            const int fw = front.right - front.left;
+            const int fh = front.bottom - front.top;
+
+            // Back cards (peek up-right) convey the stack.
+            for (int k = depth; k >= 1; --k)
             {
-                if (hd.icon)
+                const int bx = front.left + k * StackOff;
+                const int by = front.top - k * StackOff;
+                FillRound(g, (k == 1 ? cardBack : cardBack2), bx, by, fw, fh, 9);
+            }
+
+            // Front card: title bar + body placeholder (DWM draws the thumbnail).
+            FillRound(g, bodyBg, front.left, front.top, fw, fh, 9);
+            FillRound(g, titleBg, front.left, front.top, fw, TitleBar, 9);
+            g.FillRectangle(&titleBg, front.left, front.top + TitleBar - 9, fw, 9);
+
+            if (grp.icon)
+            {
+                DrawIconEx(dc, front.left + 8, front.top + (TitleBar - GroupIcon) / 2, grp.icon, GroupIcon, GroupIcon, 0, nullptr, DI_NORMAL);
+            }
+            RectF nameRect(static_cast<REAL>(front.left + 8 + GroupIcon + 8), static_cast<REAL>(front.top),
+                           static_cast<REAL>(fw - (8 + GroupIcon + 8) - 36), static_cast<REAL>(TitleBar));
+            g.DrawString(grp.name.c_str(), -1, &nameFont, nameRect, &sf, &white);
+
+            if (count > 1)
+            {
+                const int bw = 24, bh = 18;
+                const int bxx = front.right - bw - 6, byy = front.top + (TitleBar - bh) / 2;
+                FillRound(g, badge, bxx, byy, bw, bh, 8);
+                RectF br(static_cast<REAL>(bxx), static_cast<REAL>(byy), static_cast<REAL>(bw), static_cast<REAL>(bh));
+                wchar_t cnt[8];
+                swprintf_s(cnt, L"%d", count);
+                g.DrawString(cnt, -1, &titleFont, br, &center, &white);
+            }
+
+            if (i == m_selCell || i == m_hotCell)
+            {
+                StrokeRound(g, accent, front.left, front.top, fw, fh, 9);
+            }
+        }
+
+        // ---- Expanded group overlay ----
+        if (m_expandedGroup >= 0)
+        {
+            SolidBrush scrim(Color(180, 12, 12, 14));
+            g.FillRectangle(&scrim, 0, 0, w, m_gridBottom + 4);
+
+            for (int i = 0; i < static_cast<int>(m_subRects.size()); ++i)
+            {
+                const RECT r = m_subRects[i];
+                const int tw = r.right - r.left, th = r.bottom - r.top;
+                const WindowInfo& win = m_groups[m_expandedGroup].windows[i];
+
+                FillRound(g, bodyBg, r.left, r.top, tw, th, 9);
+                FillRound(g, titleBg, r.left, r.top, tw, TitleBar, 9);
+                g.FillRectangle(&titleBg, r.left, r.top + TitleBar - 9, tw, 9);
+                if (win.icon)
                 {
-                    DrawIconEx(dc, hd.rect.left, hy + (HeaderH - 24) / 2, hd.icon, 24, 24, 0, nullptr, DI_NORMAL);
+                    DrawIconEx(dc, r.left + 8, r.top + (TitleBar - 18) / 2, win.icon, 18, 18, 0, nullptr, DI_NORMAL);
                 }
-                RectF nameRect(static_cast<REAL>(hd.rect.left + 34), static_cast<REAL>(hy), 600.0f, static_cast<REAL>(HeaderH));
-                std::wstring label = hd.name + L"   " + std::to_wstring(hd.count);
-                g.DrawString(label.c_str(), -1, &headerFont, nameRect, &sf, &white);
+                RectF tr(static_cast<REAL>(r.left + 32), static_cast<REAL>(r.top), static_cast<REAL>(tw - 32 - CloseSize - 6), static_cast<REAL>(TitleBar));
+                g.DrawString(win.title.c_str(), -1, &titleFont, tr, &sf, &white);
+
+                const int cx = r.right - CloseSize - 4, cy = r.top + (TitleBar - CloseSize) / 2;
+                if (i == m_hotClose)
+                {
+                    FillRound(g, closeHot, cx, cy, CloseSize, CloseSize, 5);
+                }
+                Pen xp(Color(255, 225, 225, 225), 1.6f);
+                g.DrawLine(&xp, cx + 7, cy + 7, cx + CloseSize - 7, cy + CloseSize - 7);
+                g.DrawLine(&xp, cx + CloseSize - 7, cy + 7, cx + 7, cy + CloseSize - 7);
+
+                if (i == m_selSub || i == m_hotSub)
+                {
+                    StrokeRound(g, accent, r.left, r.top, tw, th, 9);
+                }
             }
         }
 
-        for (int i = 0; i < static_cast<int>(m_tiles.size()); ++i)
-        {
-            const Tile& t = m_tiles[i];
-            const int x = t.rect.left;
-            const int y = t.rect.top - m_scrollY;
-            const int tw = t.rect.right - t.rect.left;
-            const int th = t.rect.bottom - t.rect.top;
-            if (y + th < GridTop || y > m_gridBottom)
-            {
-                continue;
-            }
-
-            // Body placeholder (covered by the DWM thumbnail when visible).
-            FillRound(g, tileBodyBrush, x, y, tw, th, 8);
-            // Title bar.
-            FillRound(g, titleBarBrush, x, y, tw, TitleBar, 8);
-            g.FillRectangle(&titleBarBrush, x, y + TitleBar - 8, tw, 8);
-
-            if (t.icon)
-            {
-                DrawIconEx(dc, x + 8, y + (TitleBar - 16) / 2, t.icon, 16, 16, 0, nullptr, DI_NORMAL);
-            }
-            RectF titleRect(static_cast<REAL>(x + 30), static_cast<REAL>(y), static_cast<REAL>(tw - 30 - CloseSize - 6), static_cast<REAL>(TitleBar));
-            g.DrawString(t.title.c_str(), -1, &titleFont, titleRect, &sf, &white);
-
-            // Close button.
-            const int cx = x + tw - CloseSize - 4;
-            const int cy = y + (TitleBar - CloseSize) / 2;
-            if (i == m_hotClose)
-            {
-                FillRound(g, closeHotBrush, cx, cy, CloseSize, CloseSize, 4);
-            }
-            Pen xpen(Color(255, 220, 220, 220), 1.6f);
-            g.DrawLine(&xpen, cx + 7, cy + 7, cx + CloseSize - 7, cy + CloseSize - 7);
-            g.DrawLine(&xpen, cx + CloseSize - 7, cy + 7, cx + 7, cy + CloseSize - 7);
-
-            if (i == m_selected || i == m_hot)
-            {
-                DrawRoundBorder(g, accentPen, x, y, tw, th, 8);
-            }
-        }
-
-        g.ResetClip();
-
-        // Desktop strip.
-        g.DrawLine(&deskPen, Margin, m_gridBottom + 7, w - Margin, m_gridBottom + 7);
+        // ---- Desktop strip ----
         for (int i = 0; i < static_cast<int>(m_desktops.size()); ++i)
         {
             const DesktopTile& d = m_desktops[i];
-            const int x = d.rect.left;
-            const int y = d.rect.top;
-            SolidBrush deskBg(Color(255, 38, 38, 46));
-            FillRound(g, deskBg, x, y, DeskW, DeskH, 8);
+            const RECT r = d.rect;
+            GraphicsPath clip;
+            AddRound(clip, r.left, r.top, DeskW, DeskH, 9);
+            g.SetClip(&clip);
+            if (d.wallpaper)
+            {
+                g.DrawImage(d.wallpaper.get(), r.left, r.top, DeskW, DeskH);
+                SolidBrush shade(Color(70, 0, 0, 0));
+                g.FillRectangle(&shade, r.left, r.top, DeskW, DeskH);
+            }
+            else
+            {
+                SolidBrush deskBg(Color(255, 40, 40, 48));
+                g.FillRectangle(&deskBg, r.left, r.top, DeskW, DeskH);
+            }
+            g.ResetClip();
 
             if (d.isNew)
             {
-                Pen plus(Color(255, 200, 200, 205), 2.0f);
-                g.DrawLine(&plus, x + DeskW / 2 - 12, y + DeskH / 2, x + DeskW / 2 + 12, y + DeskH / 2);
-                g.DrawLine(&plus, x + DeskW / 2, y + DeskH / 2 - 12, x + DeskW / 2, y + DeskH / 2 + 12);
+                Pen plus(Color(255, 210, 210, 215), 2.0f);
+                g.DrawLine(&plus, r.left + DeskW / 2 - 12, r.top + DeskH / 2, r.left + DeskW / 2 + 12, r.top + DeskH / 2);
+                g.DrawLine(&plus, r.left + DeskW / 2, r.top + DeskH / 2 - 12, r.left + DeskW / 2, r.top + DeskH / 2 + 12);
             }
-
             if (d.isCurrent)
             {
-                DrawRoundBorder(g, accentPen, x, y, DeskW, DeskH, 8);
+                StrokeRound(g, accent, r.left, r.top, DeskW, DeskH, 9);
             }
             else if (i == m_hotDesktop)
             {
-                Pen hot(Color(255, 150, 150, 160), 2.0f);
-                DrawRoundBorder(g, hot, x, y, DeskW, DeskH, 8);
+                StrokeRound(g, hotPen, r.left, r.top, DeskW, DeskH, 9);
             }
-
-            RectF lblRect(static_cast<REAL>(x), static_cast<REAL>(y + DeskH + 3), static_cast<REAL>(DeskW), 22.0f);
-            StringFormat center;
-            center.SetAlignment(StringAlignmentCenter);
-            center.SetTrimming(StringTrimmingEllipsisCharacter);
-            center.SetFormatFlags(StringFormatFlagsNoWrap);
-            g.DrawString(d.name.c_str(), -1, &deskFont, lblRect, &center, d.isCurrent ? &white : &dim);
+            RectF lbl(static_cast<REAL>(r.left), static_cast<REAL>(r.bottom + 3), static_cast<REAL>(DeskW), 22.0f);
+            g.DrawString(d.name.c_str(), -1, &deskFont, lbl, &center, d.isCurrent ? &white : &dim);
         }
     }
 
@@ -457,17 +545,27 @@ void TaskView::Render()
     ReleaseDC(m_hwnd, screen);
 }
 
-int TaskView::TileAtPoint(POINT pt) const
+int TaskView::GroupCellAtPoint(POINT pt) const
 {
-    if (pt.y < GridTop || pt.y > m_gridBottom)
+    for (int i = 0; i < static_cast<int>(m_cells.size()); ++i)
     {
-        return -1;
+        const AppGroup& grp = m_groups[m_cells[i].group];
+        const int depth = std::min(static_cast<int>(grp.windows.size()) - 1, MaxStack);
+        const RECT cell = m_cells[i].rect;
+        const RECT front{ cell.left, cell.top + depth * StackOff, cell.right - depth * StackOff, cell.bottom };
+        if (pt.x >= front.left && pt.x < front.right && pt.y >= front.top && pt.y < front.bottom)
+        {
+            return i;
+        }
     }
-    for (int i = 0; i < static_cast<int>(m_tiles.size()); ++i)
+    return -1;
+}
+
+int TaskView::SubTileAtPoint(POINT pt) const
+{
+    for (int i = 0; i < static_cast<int>(m_subRects.size()); ++i)
     {
-        RECT r = m_tiles[i].rect;
-        r.top -= m_scrollY;
-        r.bottom -= m_scrollY;
+        const RECT r = m_subRects[i];
         if (pt.x >= r.left && pt.x < r.right && pt.y >= r.top && pt.y < r.bottom)
         {
             return i;
@@ -476,17 +574,12 @@ int TaskView::TileAtPoint(POINT pt) const
     return -1;
 }
 
-int TaskView::CloseButtonAtPoint(POINT pt) const
+int TaskView::SubCloseAtPoint(POINT pt) const
 {
-    const int i = TileAtPoint(pt);
-    if (i < 0)
-    {
-        return -1;
-    }
-    RECT r = m_tiles[i].rect;
-    const int y = r.top - m_scrollY;
-    const int cx = r.right - CloseSize - 4;
-    const int cy = y + (TitleBar - CloseSize) / 2;
+    const int i = SubTileAtPoint(pt);
+    if (i < 0) return -1;
+    const RECT r = m_subRects[i];
+    const int cx = r.right - CloseSize - 4, cy = r.top + (TitleBar - CloseSize) / 2;
     if (pt.x >= cx && pt.x < cx + CloseSize && pt.y >= cy && pt.y < cy + CloseSize)
     {
         return i;
@@ -507,79 +600,54 @@ int TaskView::DesktopAtPoint(POINT pt) const
     return -1;
 }
 
-void TaskView::MoveSelection(int dx, int dy)
+void TaskView::MoveSelection(int dx, int dy, bool expandedSpace)
 {
-    if (m_tiles.empty())
+    if (expandedSpace)
     {
-        return;
+        if (m_subRects.empty()) return;
+        m_selSub = NearestInDirection(m_subRects, m_selSub, dx, dy);
     }
-    if (m_selected < 0)
+    else
     {
-        m_selected = 0;
+        if (m_cells.empty()) return;
+        std::vector<RECT> rects;
+        rects.reserve(m_cells.size());
+        for (const auto& c : m_cells) rects.push_back(c.rect);
+        m_selCell = NearestInDirection(rects, m_selCell, dx, dy);
     }
-    else if (dx != 0)
-    {
-        m_selected = (m_selected + dx + static_cast<int>(m_tiles.size())) % static_cast<int>(m_tiles.size());
-    }
-    else if (dy != 0)
-    {
-        // Geometric move to the nearest tile in the row above/below.
-        const RECT cur = m_tiles[m_selected].rect;
-        const int curCx = (cur.left + cur.right) / 2;
-        const int curCy = (cur.top + cur.bottom) / 2;
-        int best = -1;
-        int bestScore = INT_MAX;
-        for (int i = 0; i < static_cast<int>(m_tiles.size()); ++i)
-        {
-            if (i == m_selected)
-            {
-                continue;
-            }
-            const RECT r = m_tiles[i].rect;
-            const int cy = (r.top + r.bottom) / 2;
-            if (dy < 0 && cy >= curCy - 4)
-            {
-                continue;
-            }
-            if (dy > 0 && cy <= curCy + 4)
-            {
-                continue;
-            }
-            const int cx = (r.left + r.right) / 2;
-            const int score = abs(cy - curCy) * 4 + abs(cx - curCx);
-            if (score < bestScore)
-            {
-                bestScore = score;
-                best = i;
-            }
-        }
-        if (best >= 0)
-        {
-            m_selected = best;
-        }
-    }
+    InvalidateRect(m_hwnd, nullptr, FALSE);
+}
 
-    // Keep the selection within the scrolled viewport.
-    const RECT r = m_tiles[m_selected].rect;
-    if (r.top - m_scrollY < GridTop)
+void TaskView::ActivateGroupOrExpand(int cell)
+{
+    if (cell < 0 || cell >= static_cast<int>(m_cells.size())) return;
+    const int group = m_cells[cell].group;
+    if (static_cast<int>(m_groups[group].windows.size()) <= 1)
     {
-        m_scrollY = r.top - GridTop;
+        CommitWindow(m_groups[group].windows.front().hwnd);
     }
-    if (r.bottom - m_scrollY > m_gridBottom)
+    else
     {
-        m_scrollY = r.bottom - m_gridBottom;
+        Expand(group);
     }
-    ClampScroll();
+}
+
+void TaskView::Expand(int group)
+{
+    m_expandedGroup = group;
+    m_selSub = 0;
+    m_hotSub = m_hotClose = -1;
+    LayoutExpanded();
     UpdateThumbnails();
     InvalidateRect(m_hwnd, nullptr, FALSE);
 }
 
-void TaskView::ActivateSelection()
+void TaskView::Collapse()
 {
-    if (m_selected >= 0 && m_selected < static_cast<int>(m_tiles.size()))
-    {
-        CommitWindow(m_tiles[m_selected].hwnd);
-    }
+    m_expandedGroup = -1;
+    m_subRects.clear();
+    UpdateThumbnails();
+    InvalidateRect(m_hwnd, nullptr, FALSE);
 }
 
 void TaskView::CommitWindow(HWND hwnd)
@@ -591,74 +659,52 @@ void TaskView::CommitWindow(HWND hwnd)
     }
 }
 
-void TaskView::CloseTileWindow(int tileIndex)
+void TaskView::CloseWindowAt(int subIndex)
 {
-    if (tileIndex < 0 || tileIndex >= static_cast<int>(m_tiles.size()))
+    if (m_expandedGroup < 0 || subIndex < 0 || subIndex >= static_cast<int>(m_groups[m_expandedGroup].windows.size()))
     {
         return;
     }
-    HWND hwnd = m_tiles[tileIndex].hwnd;
-    if (m_tiles[tileIndex].thumb)
-    {
-        DwmUnregisterThumbnail(m_tiles[tileIndex].thumb);
-        m_tiles[tileIndex].thumb = nullptr;
-    }
+    HWND hwnd = m_groups[m_expandedGroup].windows[subIndex].hwnd;
     PostMessageW(hwnd, WM_CLOSE, 0, 0);
 
-    // Drop the tile and its (now stale) group, then relayout from a fresh model.
-    const int group = m_tiles[tileIndex].group;
-    if (group >= 0 && group < static_cast<int>(m_groups.size()))
+    // Drop the window from the model and the matching thumbnail.
+    for (auto it = m_thumbs.begin(); it != m_thumbs.end(); ++it)
     {
-        auto& windows = m_groups[group].windows;
-        for (auto it = windows.begin(); it != windows.end(); ++it)
+        if (it->hwnd == hwnd)
         {
-            if (it->hwnd == hwnd)
-            {
-                windows.erase(it);
-                break;
-            }
+            if (it->thumb) DwmUnregisterThumbnail(it->thumb);
+            m_thumbs.erase(it);
+            break;
         }
     }
-
-    UnregisterThumbnails();
-    // Rebuild tiles/headers from the trimmed groups (drop emptied groups).
-    std::vector<AppGroup> remaining;
-    for (auto& gp : m_groups)
+    auto& windows = m_groups[m_expandedGroup].windows;
+    if (subIndex < static_cast<int>(windows.size()))
     {
-        if (!gp.windows.empty())
-        {
-            remaining.push_back(std::move(gp));
-        }
-    }
-    m_groups = std::move(remaining);
-
-    m_tiles.clear();
-    m_headers.clear();
-    for (int gi = 0; gi < static_cast<int>(m_groups.size()); ++gi)
-    {
-        m_headers.push_back(Header{ m_groups[gi].name, m_groups[gi].icon, m_groups[gi].windows.size(), {} });
-        for (const auto& win : m_groups[gi].windows)
-        {
-            Tile t{};
-            t.hwnd = win.hwnd;
-            t.title = win.title;
-            t.icon = win.icon;
-            t.group = gi;
-            m_tiles.push_back(t);
-        }
+        windows.erase(windows.begin() + subIndex);
     }
 
-    if (m_tiles.empty())
+    if (windows.empty())
     {
         Close();
         return;
     }
-    if (m_selected >= static_cast<int>(m_tiles.size()))
+    // Re-index thumbs for this group and rebuild.
+    for (auto& t : m_thumbs)
     {
-        m_selected = static_cast<int>(m_tiles.size()) - 1;
+        if (t.group == m_expandedGroup && t.indexInGroup > subIndex)
+        {
+            t.indexInGroup--;
+        }
     }
-    Layout();
-    RegisterThumbnails();
+    if (static_cast<int>(windows.size()) == 1)
+    {
+        Collapse();
+        return;
+    }
+    if (m_selSub >= static_cast<int>(windows.size())) m_selSub = static_cast<int>(windows.size()) - 1;
+    LayoutExpanded();
+    UpdateThumbnails();
     InvalidateRect(m_hwnd, nullptr, FALSE);
 }
 
@@ -674,54 +720,54 @@ LRESULT TaskView::WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         EndPaint(hwnd, &ps);
         return 0;
     }
-
     case WM_ERASEBKGND:
         return 1;
 
     case WM_KEYDOWN:
+    {
+        const bool expanded = m_expandedGroup >= 0;
         switch (wParam)
         {
         case VK_ESCAPE:
-            Close();
+            expanded ? Collapse() : Close();
             return 0;
         case VK_RETURN:
-            ActivateSelection();
+            if (expanded) CommitWindow(m_groups[m_expandedGroup].windows[m_selSub].hwnd);
+            else ActivateGroupOrExpand(m_selCell);
             return 0;
-        case VK_LEFT:
-            MoveSelection(-1, 0);
-            return 0;
-        case VK_RIGHT:
-            MoveSelection(1, 0);
-            return 0;
-        case VK_UP:
-            MoveSelection(0, -1);
-            return 0;
-        case VK_DOWN:
-            MoveSelection(0, 1);
-            return 0;
-        case VK_TAB:
-            MoveSelection((GetKeyState(VK_SHIFT) & 0x8000) ? -1 : 1, 0);
-            return 0;
-        default:
-            return 0;
+        case VK_LEFT: MoveSelection(-1, 0, expanded); return 0;
+        case VK_RIGHT: MoveSelection(1, 0, expanded); return 0;
+        case VK_UP: MoveSelection(0, -1, expanded); return 0;
+        case VK_DOWN: MoveSelection(0, 1, expanded); return 0;
+        case VK_TAB: MoveSelection((GetKeyState(VK_SHIFT) & 0x8000) ? -1 : 1, 0, expanded); return 0;
+        default: return 0;
         }
+    }
 
     case WM_MOUSEMOVE:
     {
         POINT pt{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
-        const int tile = TileAtPoint(pt);
-        const int close = CloseButtonAtPoint(pt);
         const int desk = DesktopAtPoint(pt);
-        if (tile != m_hot || close != m_hotClose || desk != m_hotDesktop)
+        if (m_expandedGroup >= 0)
         {
-            m_hot = tile;
-            m_hotClose = close;
-            m_hotDesktop = desk;
-            if (tile >= 0)
+            const int sub = SubTileAtPoint(pt);
+            const int close = SubCloseAtPoint(pt);
+            if (sub != m_hotSub || close != m_hotClose || desk != m_hotDesktop)
             {
-                m_selected = tile;
+                m_hotSub = sub; m_hotClose = close; m_hotDesktop = desk;
+                if (sub >= 0) m_selSub = sub;
+                InvalidateRect(hwnd, nullptr, FALSE);
             }
-            InvalidateRect(hwnd, nullptr, FALSE);
+        }
+        else
+        {
+            const int cell = GroupCellAtPoint(pt);
+            if (cell != m_hotCell || desk != m_hotDesktop)
+            {
+                m_hotCell = cell; m_hotDesktop = desk;
+                if (cell >= 0) m_selCell = cell;
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
         }
         return 0;
     }
@@ -729,18 +775,6 @@ LRESULT TaskView::WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     case WM_LBUTTONUP:
     {
         POINT pt{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
-        const int close = CloseButtonAtPoint(pt);
-        if (close >= 0)
-        {
-            CloseTileWindow(close);
-            return 0;
-        }
-        const int tile = TileAtPoint(pt);
-        if (tile >= 0)
-        {
-            CommitWindow(m_tiles[tile].hwnd);
-            return 0;
-        }
         const int desk = DesktopAtPoint(pt);
         if (desk >= 0)
         {
@@ -748,31 +782,24 @@ LRESULT TaskView::WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             const int target = m_desktops[desk].index;
             const int current = m_currentDesktop;
             Close();
-            if (isNew)
-            {
-                VirtualDesktops::CreateNew();
-            }
-            else
-            {
-                VirtualDesktops::SwitchTo(target, current);
-            }
+            isNew ? VirtualDesktops::CreateNew() : VirtualDesktops::SwitchTo(target, current);
             return 0;
         }
-        return 0;
-    }
-
-    case WM_MOUSEWHEEL:
-    {
-        const int delta = GET_WHEEL_DELTA_WPARAM(wParam);
-        m_scrollY -= (delta / WHEEL_DELTA) * 90;
-        ClampScroll();
-        UpdateThumbnails();
-        InvalidateRect(hwnd, nullptr, FALSE);
+        if (m_expandedGroup >= 0)
+        {
+            const int close = SubCloseAtPoint(pt);
+            if (close >= 0) { CloseWindowAt(close); return 0; }
+            const int sub = SubTileAtPoint(pt);
+            if (sub >= 0) { CommitWindow(m_groups[m_expandedGroup].windows[sub].hwnd); return 0; }
+            Collapse(); // click on the dimmed area
+            return 0;
+        }
+        const int cell = GroupCellAtPoint(pt);
+        if (cell >= 0) { ActivateGroupOrExpand(cell); }
         return 0;
     }
 
     case WM_KILLFOCUS:
-        // Dismiss when focus leaves the overlay (click-away / Alt+Tab out).
         Close();
         return 0;
 
@@ -791,24 +818,12 @@ void TaskView::ActivateWindow(HWND hwnd)
     DWORD fgThread = GetWindowThreadProcessId(foreground, nullptr);
     DWORD me = GetCurrentThreadId();
     DWORD target = GetWindowThreadProcessId(hwnd, nullptr);
-    if (fgThread != me)
-    {
-        AttachThreadInput(me, fgThread, TRUE);
-    }
-    if (target != me && target != fgThread)
-    {
-        AttachThreadInput(me, target, TRUE);
-    }
+    if (fgThread != me) AttachThreadInput(me, fgThread, TRUE);
+    if (target != me && target != fgThread) AttachThreadInput(me, target, TRUE);
     AllowSetForegroundWindow(ASFW_ANY);
     BringWindowToTop(hwnd);
     SetForegroundWindow(hwnd);
     SetFocus(hwnd);
-    if (target != me && target != fgThread)
-    {
-        AttachThreadInput(me, target, FALSE);
-    }
-    if (fgThread != me)
-    {
-        AttachThreadInput(me, fgThread, FALSE);
-    }
+    if (target != me && target != fgThread) AttachThreadInput(me, target, FALSE);
+    if (fgThread != me) AttachThreadInput(me, fgThread, FALSE);
 }

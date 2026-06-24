@@ -6,38 +6,42 @@
 #include <Windows.h>
 #include <dwmapi.h>
 
+#include <memory>
 #include <string>
 #include <vector>
 
-// A full-screen, Task-View-style overlay (triggered by Win+Tab) that shows live
-// DWM thumbnails of every window on the current desktop, clustered by app, plus
-// a virtual-desktop strip along the bottom. Unlike the Alt+Tab switcher this is
-// a persistent, focusable surface: it opens, takes focus, and stays up until the
-// user picks a window, switches desktop, presses Esc, or clicks away.
+namespace Gdiplus
+{
+    class Image;
+}
+
+// A full-screen, Task-View-style overlay (Win+Tab) that lays every window out as
+// a fluid grid of per-app *stacks*: one tile per application, sized so the whole
+// set fits on a single screen with no scrolling. Clicking a multi-window stack
+// expands it into its individual windows. A virtual-desktop strip with live
+// wallpaper previews runs along the bottom.
 class TaskView
 {
 public:
     bool Initialize(HINSTANCE hinstance);
-    void Toggle(); // open if hidden, close if shown
+    void Toggle();
     void Close();
     bool Visible() const { return m_visible; }
 
 private:
-    struct Tile
+    // One tile in the top-level grid = one application group.
+    struct Cell
+    {
+        int group = 0;
+        RECT rect{}; // whole tile
+    };
+    // A registered live thumbnail for one window.
+    struct Thumb
     {
         HWND hwnd = nullptr;
-        std::wstring title;
-        HICON icon = nullptr;
         int group = 0;
-        RECT rect{}; // content-space (pre-scroll)
+        int indexInGroup = 0;
         HTHUMBNAIL thumb = nullptr;
-    };
-    struct Header
-    {
-        std::wstring name;
-        HICON icon = nullptr;
-        size_t count = 0;
-        RECT rect{};
     };
     struct DesktopTile
     {
@@ -45,7 +49,8 @@ private:
         bool isCurrent = false;
         bool isNew = false;
         int index = 0;
-        RECT rect{}; // screen-space (strip is not scrolled)
+        RECT rect{};
+        std::shared_ptr<Gdiplus::Image> wallpaper;
     };
 
     static LRESULT CALLBACK WndProcStatic(HWND, UINT, WPARAM, LPARAM);
@@ -53,20 +58,30 @@ private:
 
     void Open();
     void BuildModel();
-    void Layout();
+    void LayoutGroups();
+    void LayoutExpanded();
     void RegisterThumbnails();
     void UpdateThumbnails();
     void UnregisterThumbnails();
     void Render();
 
-    int TileAtPoint(POINT pt) const; // index into m_tiles, or -1
-    int CloseButtonAtPoint(POINT pt) const; // index whose [x] is hit, or -1
-    int DesktopAtPoint(POINT pt) const; // index into m_desktops, or -1
-    void MoveSelection(int dx, int dy);
-    void ActivateSelection();
+    // Fit `count` tiles of body aspect into `area`, returning per-tile rects
+    // (rows centered). Never overflows: shrinks tiles until everything fits.
+    std::vector<RECT> FluidGrid(int count, RECT area, int titleBar) const;
+
+    RECT CellBody(const RECT& cell) const;
+
+    int GroupCellAtPoint(POINT pt) const;
+    int SubTileAtPoint(POINT pt) const;
+    int SubCloseAtPoint(POINT pt) const;
+    int DesktopAtPoint(POINT pt) const;
+
+    void MoveSelection(int dx, int dy, bool expandedSpace);
+    void ActivateGroupOrExpand(int cell);
+    void Expand(int group);
+    void Collapse();
     void CommitWindow(HWND hwnd);
-    void CloseTileWindow(int tileIndex);
-    void ClampScroll();
+    void CloseWindowAt(int subIndex);
 
     static void ActivateWindow(HWND hwnd);
 
@@ -74,19 +89,23 @@ private:
     HWND m_hwnd = nullptr;
     bool m_visible = false;
 
-    RECT m_monitor{}; // full monitor bounds the overlay covers
-    int m_scrollY = 0;
-    int m_contentHeight = 0;
-    int m_gridBottom = 0; // y where the grid area ends and the desktop strip begins
+    RECT m_monitor{};
+    int m_gridBottom = 0;
 
     std::vector<AppGroup> m_groups;
-    std::vector<Tile> m_tiles;
-    std::vector<Header> m_headers;
+    std::vector<Cell> m_cells;
+    std::vector<Thumb> m_thumbs;
     std::vector<DesktopTile> m_desktops;
     int m_currentDesktop = 0;
 
-    int m_selected = -1;
-    int m_hot = -1; // hovered tile
-    int m_hotClose = -1; // hovered close button
+    int m_expandedGroup = -1;
+    std::vector<RECT> m_subRects; // expanded group's window tiles
+    RECT m_expandArea{};
+
+    int m_selCell = 0; // selection in group view
+    int m_selSub = 0; // selection in expanded view
+    int m_hotCell = -1;
+    int m_hotSub = -1;
+    int m_hotClose = -1;
     int m_hotDesktop = -1;
 };

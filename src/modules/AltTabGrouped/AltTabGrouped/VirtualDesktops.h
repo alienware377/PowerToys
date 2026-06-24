@@ -13,6 +13,7 @@
 struct DesktopInfo
 {
     std::wstring name;
+    std::wstring wallpaperPath; // per-desktop wallpaper, or the system wallpaper
     bool isCurrent = false;
 };
 

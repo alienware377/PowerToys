@@ -45,30 +45,36 @@ namespace
         return current;
     }
 
-    std::wstring ReadDesktopName(const GUID& guid, int fallbackIndex)
+    std::wstring ReadDesktopString(const GUID& guid, const wchar_t* valueName)
     {
         wchar_t guidStr[64] = {};
         StringFromGUID2(guid, guidStr, ARRAYSIZE(guidStr));
 
         std::wstring subKey = std::wstring(VirtualDesktopsKey) + L"\\Desktops\\" + guidStr;
         HKEY key = nullptr;
-        std::wstring name;
+        std::wstring value;
         if (RegOpenKeyExW(HKEY_CURRENT_USER, subKey.c_str(), 0, KEY_READ, &key) == ERROR_SUCCESS)
         {
-            wchar_t buffer[256] = {};
+            wchar_t buffer[1024] = {};
             DWORD size = sizeof(buffer);
             DWORD type = 0;
-            if (RegQueryValueExW(key, L"Name", nullptr, &type, reinterpret_cast<BYTE*>(buffer), &size) == ERROR_SUCCESS && type == REG_SZ && buffer[0])
+            if (RegQueryValueExW(key, valueName, nullptr, &type, reinterpret_cast<BYTE*>(buffer), &size) == ERROR_SUCCESS && type == REG_SZ && buffer[0])
             {
-                name = buffer;
+                value = buffer;
             }
             RegCloseKey(key);
         }
-        if (name.empty())
+        return value;
+    }
+
+    std::wstring CurrentWallpaper()
+    {
+        wchar_t path[MAX_PATH] = {};
+        if (SystemParametersInfoW(SPI_GETDESKWALLPAPER, MAX_PATH, path, 0) && path[0])
         {
-            name = L"Desktop " + std::to_wstring(fallbackIndex + 1);
+            return path;
         }
-        return name;
+        return std::wstring();
     }
 
     void SendChord(WORD vk)
@@ -96,11 +102,21 @@ std::vector<DesktopInfo> VirtualDesktops::Enumerate(int& currentIndex)
 
     const std::vector<GUID> guids = ReadGuidList();
     const GUID current = ReadCurrentGuid();
+    const std::wstring fallbackWallpaper = CurrentWallpaper();
 
     for (size_t i = 0; i < guids.size(); ++i)
     {
         DesktopInfo info{};
-        info.name = ReadDesktopName(guids[i], static_cast<int>(i));
+        info.name = ReadDesktopString(guids[i], L"Name");
+        if (info.name.empty())
+        {
+            info.name = L"Desktop " + std::to_wstring(i + 1);
+        }
+        info.wallpaperPath = ReadDesktopString(guids[i], L"Wallpaper");
+        if (info.wallpaperPath.empty())
+        {
+            info.wallpaperPath = fallbackWallpaper;
+        }
         info.isCurrent = IsEqualGUID(guids[i], current) != 0;
         if (info.isCurrent)
         {
@@ -112,7 +128,7 @@ std::vector<DesktopInfo> VirtualDesktops::Enumerate(int& currentIndex)
     // Always present at least the current desktop so the strip is never empty.
     if (result.empty())
     {
-        result.push_back(DesktopInfo{ L"Desktop 1", true });
+        result.push_back(DesktopInfo{ L"Desktop 1", fallbackWallpaper, true });
     }
     return result;
 }
