@@ -75,6 +75,7 @@
     <ClCompile Include="AppGrouping.cpp" />
     <ClCompile Include="WindowEnumerator.cpp" />
     <ClCompile Include="SwitcherWindow.cpp" />
+    <ClCompile Include="TrayIcon.cpp" />
     <ClCompile Include="main.cpp" />
     <ClCompile Include="trace.cpp" />
     <ClCompile Include="pch.cpp">
@@ -86,6 +87,7 @@
     <ClInclude Include="AppGrouping.h" />
     <ClInclude Include="WindowEnumerator.h" />
     <ClInclude Include="SwitcherWindow.h" />
+    <ClInclude Include="TrayIcon.h" />
     <ClInclude Include="ModuleConstants.h" />
     <ClInclude Include="trace.h" />
     <ClInclude Include="pch.h" />

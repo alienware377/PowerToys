@@ -11,8 +11,10 @@
 
 #include "AltTabGrouped.h"
 #include "ModuleConstants.h"
+#include "TrayIcon.h"
 #include "trace.h"
 
+#include <memory>
 #include <thread>
 
 // Non-localizable
@@ -72,6 +74,17 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ PWSTR lpC
 
     {
         AltTabGrouped app(hInstance, mainThreadId);
+
+        // When launched without a parent PID we are running standalone (not under
+        // the PowerToys runner): add a tray icon so the user can quit, since the
+        // app otherwise silently owns Alt+Tab.
+        std::unique_ptr<TrayIcon> tray;
+        if (pid.empty())
+        {
+            tray = std::make_unique<TrayIcon>();
+            tray->Create(hInstance, mainThreadId);
+        }
+
         run_message_loop();
     }
 
