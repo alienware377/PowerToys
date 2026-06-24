@@ -30,23 +30,64 @@ AltTabGrouped::AltTabGrouped(HINSTANCE hinstance, DWORD mainThreadId) :
 
     m_taskView.Initialize(hinstance);
 
-    m_keyboardHook = SetWindowsHookExW(WH_KEYBOARD_LL, KeyboardHookProc, hinstance, 0);
+    // Run the hook on a dedicated thread; wait until it is installed.
+    m_hookReady = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    m_hookThread = std::thread(&AltTabGrouped::HookThreadMain, this);
+    if (m_hookReady)
+    {
+        WaitForSingleObject(m_hookReady, 5000);
+    }
+}
+
+void AltTabGrouped::HookThreadMain()
+{
+    m_hookThreadId = GetCurrentThreadId();
+
+    m_keyboardHook = SetWindowsHookExW(WH_KEYBOARD_LL, KeyboardHookProc, m_hinstance, 0);
     if (!m_keyboardHook)
     {
         Logger::error(L"Failed to install the low-level keyboard hook for AltTabGrouped");
     }
     else
     {
-        Logger::info(L"AltTabGrouped keyboard hook installed (Win+Tab)");
+        Logger::info(L"AltTabGrouped keyboard hook installed (Win+Tab) on dedicated thread");
+    }
+
+    if (m_hookReady)
+    {
+        SetEvent(m_hookReady);
+    }
+
+    // Minimal pump: this thread does nothing but service the hook, so the hook
+    // is never starved by UI work happening on the main thread.
+    MSG msg;
+    while (GetMessageW(&msg, nullptr, 0, 0) > 0)
+    {
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
+
+    if (m_keyboardHook)
+    {
+        UnhookWindowsHookEx(m_keyboardHook);
+        m_keyboardHook = nullptr;
     }
 }
 
 AltTabGrouped::~AltTabGrouped()
 {
-    if (m_keyboardHook)
+    if (m_hookThreadId)
     {
-        UnhookWindowsHookEx(m_keyboardHook);
-        m_keyboardHook = nullptr;
+        PostThreadMessageW(m_hookThreadId, WM_QUIT, 0, 0);
+    }
+    if (m_hookThread.joinable())
+    {
+        m_hookThread.join();
+    }
+    if (m_hookReady)
+    {
+        CloseHandle(m_hookReady);
+        m_hookReady = nullptr;
     }
     if (m_controlWnd)
     {
