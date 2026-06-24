@@ -92,14 +92,26 @@ bool TaskView::Initialize(HINSTANCE hinstance)
     wc.lpszClassName = TaskViewClassName;
     RegisterClassExW(&wc);
 
-    m_hwnd = CreateWindowExW(WS_EX_TOPMOST | WS_EX_LAYERED, TaskViewClassName, L"", WS_POPUP,
-                             0, 0, 100, 100, nullptr, nullptr, hinstance, this);
-    if (!m_hwnd)
+    CreateOverlayWindow();
+    return m_hwnd != nullptr;
+}
+
+// A top-level window belongs to whichever virtual desktop it was created on, and
+// can't be shown on another. Recreating it on each open guarantees it appears on
+// the desktop the user is currently viewing (so Win+Tab works on every desktop).
+void TaskView::CreateOverlayWindow()
+{
+    if (m_hwnd)
     {
-        return false;
+        DestroyWindow(m_hwnd);
+        m_hwnd = nullptr;
     }
-    SetLayeredWindowAttributes(m_hwnd, 0, 240, LWA_ALPHA);
-    return true;
+    m_hwnd = CreateWindowExW(WS_EX_TOPMOST | WS_EX_LAYERED, TaskViewClassName, L"", WS_POPUP,
+                             0, 0, 100, 100, nullptr, nullptr, m_hinstance, this);
+    if (m_hwnd)
+    {
+        SetLayeredWindowAttributes(m_hwnd, 0, 240, LWA_ALPHA);
+    }
 }
 
 LRESULT CALLBACK TaskView::WndProcStatic(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
@@ -121,6 +133,13 @@ void TaskView::Toggle()
 
 void TaskView::Open()
 {
+    // Recreate the overlay so it lives on the desktop the user is viewing now.
+    CreateOverlayWindow();
+    if (!m_hwnd)
+    {
+        return;
+    }
+
     HMONITOR mon = MonitorFromWindow(GetForegroundWindow(), MONITOR_DEFAULTTOPRIMARY);
     MONITORINFO mi{ sizeof(mi) };
     GetMonitorInfoW(mon, &mi);

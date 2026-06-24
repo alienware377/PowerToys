@@ -57,6 +57,7 @@ private:
     static LRESULT CALLBACK WndProcStatic(HWND, UINT, WPARAM, LPARAM);
     LRESULT WndProc(HWND, UINT, WPARAM, LPARAM);
 
+    void CreateOverlayWindow(); // (re)create on the active desktop
     void Open();
     void BuildModel();
     void LayoutGroups();
