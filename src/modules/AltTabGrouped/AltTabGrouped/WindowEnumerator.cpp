@@ -8,6 +8,16 @@
 #define DWMWA_CLOAKED 14
 #endif
 
+// Cloak reasons. Only DWM_CLOAKED_SHELL (suspended UWP / system-hidden UI such
+// as "Windows Input Experience") should be excluded; DWM_CLOAKED_APP windows are
+// real app windows (e.g. Chrome/Explorer windows, including ones on another
+// virtual desktop) that the user still wants to see and switch to.
+#ifndef DWM_CLOAKED_APP
+#define DWM_CLOAKED_APP 0x0000001
+#define DWM_CLOAKED_SHELL 0x0000002
+#define DWM_CLOAKED_INHERITED 0x0000004
+#endif
+
 namespace
 {
     // Returns the "last visible active popup" of the owner chain, mirroring the
@@ -41,7 +51,9 @@ bool WindowEnumerator::IsCloaked(HWND hwnd)
     int cloaked = 0;
     if (SUCCEEDED(DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, &cloaked, sizeof(cloaked))))
     {
-        return cloaked != 0;
+        // Exclude only shell-cloaked windows (suspended UWP / hidden system UI),
+        // not app-cloaked ones (real windows, incl. those on other desktops).
+        return (cloaked & DWM_CLOAKED_SHELL) != 0;
     }
     return false;
 }
