@@ -107,6 +107,7 @@ std::vector<DesktopInfo> VirtualDesktops::Enumerate(int& currentIndex)
     for (size_t i = 0; i < guids.size(); ++i)
     {
         DesktopInfo info{};
+        info.id = guids[i];
         info.name = ReadDesktopString(guids[i], L"Name");
         if (info.name.empty())
         {
@@ -128,7 +129,11 @@ std::vector<DesktopInfo> VirtualDesktops::Enumerate(int& currentIndex)
     // Always present at least the current desktop so the strip is never empty.
     if (result.empty())
     {
-        result.push_back(DesktopInfo{ L"Desktop 1", fallbackWallpaper, true });
+        DesktopInfo only{};
+        only.name = L"Desktop 1";
+        only.wallpaperPath = fallbackWallpaper;
+        only.isCurrent = true;
+        result.push_back(std::move(only));
     }
     return result;
 }

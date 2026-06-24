@@ -12,6 +12,7 @@
 // shortcuts, which are stable across builds.
 struct DesktopInfo
 {
+    GUID id{}; // desktop identity, used to map windows to desktops
     std::wstring name;
     std::wstring wallpaperPath; // per-desktop wallpaper, or the system wallpaper
     bool isCurrent = false;

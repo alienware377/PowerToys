@@ -45,6 +45,7 @@ private:
     };
     struct DesktopTile
     {
+        GUID id{};
         std::wstring name;
         bool isCurrent = false;
         bool isNew = false;
@@ -63,6 +64,7 @@ private:
     void RegisterThumbnails();
     void UpdateThumbnails();
     void UnregisterThumbnails();
+    void BuildDesktopThumbnails(); // live mini-previews of each desktop's windows
     void Render();
 
     // Fit `count` tiles of body aspect into `area`, returning per-tile rects
@@ -96,6 +98,7 @@ private:
     std::vector<Cell> m_cells;
     std::vector<Thumb> m_thumbs;
     std::vector<DesktopTile> m_desktops;
+    std::vector<HTHUMBNAIL> m_deskThumbs; // composited window previews in the strip
     int m_currentDesktop = 0;
 
     int m_expandedGroup = -1;

@@ -6,6 +6,8 @@
 #include <climits>
 #include <algorithm>
 #include <gdiplus.h>
+#include <objbase.h>
+#include <shobjidl.h>
 
 #pragma comment(lib, "dwmapi.lib")
 #pragma comment(lib, "gdiplus.lib")
@@ -152,6 +154,7 @@ void TaskView::Open()
     AttachThreadInput(me, fg, FALSE);
 
     RegisterThumbnails();
+    BuildDesktopThumbnails();
     m_visible = true;
     InvalidateRect(m_hwnd, nullptr, FALSE);
 }
@@ -193,6 +196,7 @@ void TaskView::BuildModel()
     for (int i = 0; i < static_cast<int>(desks.size()); ++i)
     {
         DesktopTile t{};
+        t.id = desks[i].id;
         t.name = desks[i].name;
         t.isCurrent = desks[i].isCurrent;
         t.index = i;
@@ -210,7 +214,11 @@ void TaskView::BuildModel()
         }
         m_desktops.push_back(std::move(t));
     }
-    m_desktops.push_back(DesktopTile{ L"New desktop", false, true, static_cast<int>(desks.size()), {}, nullptr });
+    DesktopTile newTile{};
+    newTile.name = L"New desktop";
+    newTile.isNew = true;
+    newTile.index = static_cast<int>(desks.size());
+    m_desktops.push_back(std::move(newTile));
 }
 
 std::vector<RECT> TaskView::FluidGrid(int count, RECT area, int titleBar) const
@@ -364,6 +372,108 @@ void TaskView::UnregisterThumbnails()
             DwmUnregisterThumbnail(t.thumb);
             t.thumb = nullptr;
         }
+    }
+    for (HTHUMBNAIL h : m_deskThumbs)
+    {
+        DwmUnregisterThumbnail(h);
+    }
+    m_deskThumbs.clear();
+}
+
+// Composite a live mini-preview of each desktop's open windows into its strip
+// tile, on top of the wallpaper, mirroring how the native Task View renders
+// desktop previews. Each window gets its own DWM thumbnail scaled to the tile.
+void TaskView::BuildDesktopThumbnails()
+{
+    const int mw = m_monitor.right - m_monitor.left;
+    const int mh = m_monitor.bottom - m_monitor.top;
+    if (mw <= 0 || mh <= 0)
+    {
+        return;
+    }
+    const double scaleX = static_cast<double>(DeskW) / mw;
+    const double scaleY = static_cast<double>(DeskH) / mh;
+
+    IVirtualDesktopManager* vdm = nullptr;
+    CoCreateInstance(CLSID_VirtualDesktopManager, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&vdm));
+
+    // Bottom-to-top z-order so the topmost window registers last and draws on top.
+    auto windows = WindowEnumerator::Enumerate();
+    std::reverse(windows.begin(), windows.end());
+
+    for (const auto& win : windows)
+    {
+        if (IsIconic(win.hwnd))
+        {
+            continue;
+        }
+
+        // Find the desktop tile this window belongs to.
+        int deskIndex = -1;
+        if (vdm)
+        {
+            GUID gid{};
+            if (SUCCEEDED(vdm->GetWindowDesktopId(win.hwnd, &gid)))
+            {
+                for (int d = 0; d < static_cast<int>(m_desktops.size()); ++d)
+                {
+                    if (!m_desktops[d].isNew && IsEqualGUID(m_desktops[d].id, gid))
+                    {
+                        deskIndex = d;
+                        break;
+                    }
+                }
+            }
+        }
+        if (deskIndex < 0)
+        {
+            // Fall back to the current desktop when the id can't be resolved.
+            deskIndex = m_currentDesktop;
+        }
+        if (deskIndex < 0 || deskIndex >= static_cast<int>(m_desktops.size()))
+        {
+            continue;
+        }
+
+        RECT wr{};
+        if (!GetWindowRect(win.hwnd, &wr))
+        {
+            continue;
+        }
+        const RECT tile = m_desktops[deskIndex].rect;
+        RECT dest{};
+        dest.left = tile.left + static_cast<int>((wr.left - m_monitor.left) * scaleX);
+        dest.top = tile.top + static_cast<int>((wr.top - m_monitor.top) * scaleY);
+        dest.right = tile.left + static_cast<int>((wr.right - m_monitor.left) * scaleX);
+        dest.bottom = tile.top + static_cast<int>((wr.bottom - m_monitor.top) * scaleY);
+
+        // Clamp to the tile so previews never bleed into neighbours.
+        dest.left = std::max(dest.left, tile.left);
+        dest.top = std::max(dest.top, tile.top);
+        dest.right = std::min(dest.right, tile.right);
+        dest.bottom = std::min(dest.bottom, tile.bottom);
+        if (dest.right - dest.left < 4 || dest.bottom - dest.top < 4)
+        {
+            continue;
+        }
+
+        HTHUMBNAIL th = nullptr;
+        if (SUCCEEDED(DwmRegisterThumbnail(m_hwnd, win.hwnd, &th)) && th)
+        {
+            DWM_THUMBNAIL_PROPERTIES props{};
+            props.dwFlags = DWM_TNP_RECTDESTINATION | DWM_TNP_VISIBLE | DWM_TNP_OPACITY | DWM_TNP_SOURCECLIENTAREAONLY;
+            props.fSourceClientAreaOnly = FALSE;
+            props.opacity = 255;
+            props.fVisible = TRUE;
+            props.rcDestination = dest;
+            DwmUpdateThumbnailProperties(th, &props);
+            m_deskThumbs.push_back(th);
+        }
+    }
+
+    if (vdm)
+    {
+        vdm->Release();
     }
 }
 
