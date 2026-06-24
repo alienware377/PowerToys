@@ -1,0 +1,2 @@
+// Minimal resource script for the AltTabGrouped module interface.
+#include "resource.h"

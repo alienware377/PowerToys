@@ -76,6 +76,9 @@ namespace CommonSharedConstants
 
     const wchar_t ALWAYS_ON_TOP_DECREASE_OPACITY_EVENT[] = L"Local\\AlwaysOnTopDecreaseOpacityEvent-b2c3d4e5-f6a7-8901-bcde-f12345678901";
 
+    // Path to the event used to terminate AltTabGrouped when it is disabled
+    const wchar_t ALT_TAB_GROUPED_TERMINATE_EVENT[] = L"Local\\AltTabGroupedTerminateEvent-7f3c1d2a-9b84-4e5f-a6c7-1d2e3f4a5b6c";
+
     // Path to the event used by PowerAccent
     const wchar_t POWERACCENT_EXIT_EVENT[] = L"Local\\PowerToysPowerAccentExitEvent-53e93389-d19a-4fbb-9b36-1981c8965e17";
 

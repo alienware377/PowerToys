@@ -158,6 +158,10 @@
     <Project Path="src/modules/alwaysontop/AlwaysOnTop/AlwaysOnTop.vcxproj" Id="1dc3be92-ce89-43fb-8110-9c043a2fe7a2" />
     <Project Path="src/modules/alwaysontop/AlwaysOnTopModuleInterface/AlwaysOnTopModuleInterface.vcxproj" Id="48a0a19e-a0be-4256-acf8-cc3b80291af9" />
   </Folder>
+  <Folder Name="/modules/AltTabGrouped/">
+    <Project Path="src/modules/AltTabGrouped/AltTabGrouped/AltTabGrouped.vcxproj" Id="a1b2c3d4-0001-4e5f-a6c7-aaaa11112222" />
+    <Project Path="src/modules/AltTabGrouped/AltTabGroupedModuleInterface/AltTabGroupedModuleInterface.vcxproj" Id="a1b2c3d4-0002-4e5f-a6c7-aaaa11112222" />
+  </Folder>
   <Folder Name="/modules/awake/">
     <Project Path="src/modules/awake/Awake.ModuleServices/Awake.ModuleServices.csproj">
       <Platform Solution="*|ARM64" Project="ARM64" />
