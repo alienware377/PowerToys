@@ -74,7 +74,8 @@
     <ClCompile Include="AltTabGrouped.cpp" />
     <ClCompile Include="AppGrouping.cpp" />
     <ClCompile Include="WindowEnumerator.cpp" />
-    <ClCompile Include="SwitcherWindow.cpp" />
+    <ClCompile Include="TaskView.cpp" />
+    <ClCompile Include="VirtualDesktops.cpp" />
     <ClCompile Include="TrayIcon.cpp" />
     <ClCompile Include="main.cpp" />
     <ClCompile Include="trace.cpp" />
@@ -86,7 +87,8 @@
     <ClInclude Include="AltTabGrouped.h" />
     <ClInclude Include="AppGrouping.h" />
     <ClInclude Include="WindowEnumerator.h" />
-    <ClInclude Include="SwitcherWindow.h" />
+    <ClInclude Include="TaskView.h" />
+    <ClInclude Include="VirtualDesktops.h" />
     <ClInclude Include="TrayIcon.h" />
     <ClInclude Include="ModuleConstants.h" />
     <ClInclude Include="trace.h" />

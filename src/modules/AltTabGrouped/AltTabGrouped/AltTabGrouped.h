@@ -1,17 +1,17 @@
 #pragma once
 
-#include "SwitcherWindow.h"
+#include "TaskView.h"
 
 #include <Windows.h>
 
-// The core of the grouped Alt+Tab switcher. It installs a low-level keyboard
-// hook to intercept Alt+Tab before the shell sees it, drives a two-level
-// selection (apps, then the focused app's windows) through a control window,
-// and activates the chosen window when Alt is released.
+// Core controller for the grouped Task View. It installs a low-level keyboard
+// hook to intercept Win+Tab before the shell opens the built-in Task View, and
+// toggles a full-screen, app-grouped overlay (TaskView) in its place.
 //
-// The hook callback itself only decides whether to swallow a key and posts the
-// heavy work (window enumeration, grouping, rendering) to the control window so
-// it never blocks long enough for Windows to silently drop the hook.
+// The hook only decides whether to swallow Win+Tab and posts the heavy work to a
+// hidden control window so it never blocks long enough for Windows to drop it.
+// Once the overlay is open it is the foreground window and handles its own
+// keyboard and mouse input directly.
 class AltTabGrouped
 {
 public:
@@ -21,6 +21,10 @@ public:
     AltTabGrouped(const AltTabGrouped&) = delete;
     AltTabGrouped& operator=(const AltTabGrouped&) = delete;
 
+    // Opens the overlay once without a keypress (used by the --selftest launch
+    // to validate rendering, since injected Win+Tab is intentionally ignored).
+    void ShowForSelfTest();
+
 private:
     static LRESULT CALLBACK KeyboardHookProc(int code, WPARAM wParam, LPARAM lParam);
     bool HandleKey(WPARAM message, const KBDLLHOOKSTRUCT& info); // returns true to swallow
@@ -28,19 +32,15 @@ private:
     static LRESULT CALLBACK ControlWndProcStatic(HWND, UINT, WPARAM, LPARAM);
     LRESULT ControlWndProc(HWND, UINT, WPARAM, LPARAM);
 
-    void StartSwitcher(bool shift);
-    void Commit();
-    void Cancel();
-    static void ActivateWindow(HWND hwnd);
+    static void SuppressStartMenu();
 
     HINSTANCE m_hinstance = nullptr;
     DWORD m_mainThreadId = 0;
     HHOOK m_keyboardHook = nullptr;
     HWND m_controlWnd = nullptr;
 
-    SwitcherWindow m_switcher;
-    bool m_active = false; // switcher is currently shown
-    bool m_cancelled = false;
+    TaskView m_taskView;
+    bool m_winDown = false;
 
     static AltTabGrouped* s_instance;
 };

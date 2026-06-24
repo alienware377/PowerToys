@@ -46,7 +46,9 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ PWSTR lpC
 
     // Exit cleanly when the runner exits.
     const std::wstring pid = lpCmdLine ? std::wstring(lpCmdLine) : std::wstring();
-    if (!pid.empty())
+    const bool selftest = (pid.find(L"selftest") != std::wstring::npos);
+    const bool standalone = pid.empty() || selftest;
+    if (!standalone)
     {
         ProcessWaiter::OnProcessTerminate(pid, [mainThreadId](int) {
             Logger::trace(L"Runner exited, stopping AltTabGrouped");
@@ -79,10 +81,15 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ PWSTR lpC
         // the PowerToys runner): add a tray icon so the user can quit, since the
         // app otherwise silently owns Alt+Tab.
         std::unique_ptr<TrayIcon> tray;
-        if (pid.empty())
+        if (standalone)
         {
             tray = std::make_unique<TrayIcon>();
             tray->Create(hInstance, mainThreadId);
+        }
+
+        if (selftest)
+        {
+            app.ShowForSelfTest();
         }
 
         run_message_loop();
