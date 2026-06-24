@@ -77,11 +77,10 @@ bool WindowEnumerator::IsAltTabWindow(HWND hwnd)
         return false;
     }
 
-    // Cloaked windows are on another virtual desktop or are suspended UWP apps.
-    if (IsCloaked(hwnd))
-    {
-        return false;
-    }
+    // NOTE: cloaking is intentionally NOT used to exclude here. Windows on other
+    // virtual desktops are cloaked too, and we want them in the grouped view.
+    // Suspended-UWP / system junk is filtered later by virtual-desktop membership
+    // (see TaskView::BuildModel).
 
     const LONG_PTR exStyle = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
 

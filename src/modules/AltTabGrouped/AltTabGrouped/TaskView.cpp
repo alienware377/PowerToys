@@ -12,6 +12,13 @@
 #pragma comment(lib, "dwmapi.lib")
 #pragma comment(lib, "gdiplus.lib")
 
+#ifndef DWMWA_CLOAKED
+#define DWMWA_CLOAKED 14
+#endif
+#ifndef DWM_CLOAKED_SHELL
+#define DWM_CLOAKED_SHELL 0x0000002
+#endif
+
 using namespace Gdiplus;
 
 namespace
@@ -194,7 +201,67 @@ void TaskView::Close()
 
 void TaskView::BuildModel()
 {
-    m_groups = AppGrouping::Group(WindowEnumerator::Enumerate());
+    // Desktops first, so we can filter windows by desktop membership.
+    int current = 0;
+    auto desks = VirtualDesktops::Enumerate(current);
+    m_currentDesktop = current;
+
+    // Keep windows that live on a real virtual desktop (any of them) or on the
+    // current desktop / pinned. This includes other-desktop windows while
+    // dropping suspended-UWP and hidden system UI that map to no real desktop.
+    IVirtualDesktopManager* vdm = nullptr;
+    CoCreateInstance(CLSID_VirtualDesktopManager, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&vdm));
+
+    const GUID curId = (current >= 0 && current < static_cast<int>(desks.size())) ? desks[current].id : GUID{};
+
+    auto windows = WindowEnumerator::Enumerate();
+    {
+        std::vector<WindowInfo> kept;
+        kept.reserve(windows.size());
+        for (auto& win : windows)
+        {
+            int cloaked = 0;
+            DwmGetWindowAttribute(win.hwnd, DWMWA_CLOAKED, &cloaked, sizeof(cloaked));
+            const bool shellCloaked = (cloaked & DWM_CLOAKED_SHELL) != 0;
+
+            bool keep;
+            if (!shellCloaked)
+            {
+                // Visible on the current desktop (or merely app-cloaked) -> real window.
+                keep = true;
+            }
+            else
+            {
+                // Shell-cloaked: keep only if it's a real window parked on ANOTHER
+                // desktop; drop suspended-UWP / hidden system UI (which map to the
+                // current desktop id or to no desktop at all).
+                keep = false;
+                GUID gid{};
+                if (vdm && SUCCEEDED(vdm->GetWindowDesktopId(win.hwnd, &gid)) && !IsEqualGUID(gid, curId))
+                {
+                    for (const auto& d : desks)
+                    {
+                        if (IsEqualGUID(d.id, gid))
+                        {
+                            keep = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            if (keep)
+            {
+                kept.push_back(std::move(win));
+            }
+        }
+        windows = std::move(kept);
+    }
+    if (vdm)
+    {
+        vdm->Release();
+    }
+
+    m_groups = AppGrouping::Group(std::move(windows));
 
     m_cells.clear();
     m_thumbs.clear();
@@ -209,9 +276,6 @@ void TaskView::BuildModel()
 
     // Desktops + wallpaper previews.
     m_desktops.clear();
-    int current = 0;
-    auto desks = VirtualDesktops::Enumerate(current);
-    m_currentDesktop = current;
     for (int i = 0; i < static_cast<int>(desks.size()); ++i)
     {
         DesktopTile t{};
