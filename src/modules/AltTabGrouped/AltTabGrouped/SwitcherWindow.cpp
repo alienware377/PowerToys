@@ -330,8 +330,11 @@ void SwitcherWindow::Render()
             wchar_t count[16];
             swprintf_s(count, L"%zu", group.windows.size());
             RectF countRect(static_cast<REAL>(w - Pad - 36), static_cast<REAL>(y), 30.0f, static_cast<REAL>(GroupRowH));
-            StringFormat rightFmt(fmt);
+            // GdiplusStringFormat's copy ctor is protected, so build a fresh one.
+            StringFormat rightFmt;
+            rightFmt.SetLineAlignment(StringAlignmentCenter);
             rightFmt.SetAlignment(StringAlignmentFar);
+            rightFmt.SetFormatFlags(StringFormatFlagsNoWrap);
             g.DrawString(count, -1, &countFont, countRect, &rightFmt, &dimBrush);
 
             y += GroupRowH;

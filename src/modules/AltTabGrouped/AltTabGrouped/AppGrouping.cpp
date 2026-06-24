@@ -3,8 +3,10 @@
 
 #include <propkey.h>
 #include <propsys.h>
+#include <shellapi.h>
 #include <shlobj.h>
 #include <shlwapi.h>
+#include <shobjidl.h>
 
 #include <algorithm>
 #include <cwctype>
