@@ -117,8 +117,62 @@ void TaskView::CreateOverlayWindow()
                              0, 0, 100, 100, nullptr, nullptr, m_hinstance, this);
     if (m_hwnd)
     {
-        SetLayeredWindowAttributes(m_hwnd, 0, 240, LWA_ALPHA);
+        SetLayeredWindowAttributes(m_hwnd, 0, 252, LWA_ALPHA);
     }
+}
+
+// Capture the desktop, blur it (downscale/upscale a couple of times), and darken
+// it. This static snapshot serves as an acrylic-style backdrop behind the grid;
+// it never updates while the (transient) overlay is open, which is unnoticeable.
+void TaskView::CaptureBlurredBackground()
+{
+    if (m_background)
+    {
+        DeleteObject(m_background);
+        m_background = nullptr;
+    }
+    const int mw = m_monitor.right - m_monitor.left;
+    const int mh = m_monitor.bottom - m_monitor.top;
+    if (mw <= 0 || mh <= 0)
+    {
+        return;
+    }
+
+    HDC screen = GetDC(nullptr);
+    HDC mem = CreateCompatibleDC(screen);
+    HBITMAP full = CreateCompatibleBitmap(screen, mw, mh);
+    HBITMAP oldFull = static_cast<HBITMAP>(SelectObject(mem, full));
+    BitBlt(mem, 0, 0, mw, mh, screen, m_monitor.left, m_monitor.top, SRCCOPY | CAPTUREBLT);
+
+    const int sw = std::max(1, mw / 14);
+    const int sh = std::max(1, mh / 14);
+    HDC lowDc = CreateCompatibleDC(screen); // 'small' is a Windows macro, avoid it
+    HBITMAP lowBmp = CreateCompatibleBitmap(screen, sw, sh);
+    HBITMAP oldLow = static_cast<HBITMAP>(SelectObject(lowDc, lowBmp));
+    SetStretchBltMode(lowDc, HALFTONE);
+    SetStretchBltMode(mem, HALFTONE);
+
+    // Two down/up cycles produce a soft, even blur cheaply.
+    for (int pass = 0; pass < 2; ++pass)
+    {
+        StretchBlt(lowDc, 0, 0, sw, sh, mem, 0, 0, mw, mh, SRCCOPY);
+        StretchBlt(mem, 0, 0, mw, mh, lowDc, 0, 0, sw, sh, SRCCOPY);
+    }
+
+    // Darken so the grid and white text stay readable.
+    {
+        Graphics g(mem);
+        SolidBrush dark(Color(100, 10, 10, 14));
+        g.FillRectangle(&dark, 0, 0, mw, mh);
+    }
+
+    SelectObject(lowDc, oldLow);
+    SelectObject(mem, oldFull);
+    DeleteObject(lowBmp);
+    DeleteDC(lowDc);
+    DeleteDC(mem);
+    ReleaseDC(nullptr, screen);
+    m_background = full;
 }
 
 LRESULT CALLBACK TaskView::WndProcStatic(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
@@ -151,6 +205,9 @@ void TaskView::Open()
     MONITORINFO mi{ sizeof(mi) };
     GetMonitorInfoW(mon, &mi);
     m_monitor = mi.rcMonitor;
+
+    // Grab a blurred snapshot of the desktop while our window is still hidden.
+    CaptureBlurredBackground();
 
     BuildModel();
     if (m_cells.empty())
@@ -191,6 +248,11 @@ void TaskView::Close()
     m_visible = false;
     UnregisterThumbnails();
     ShowWindow(m_hwnd, SW_HIDE);
+    if (m_background)
+    {
+        DeleteObject(m_background);
+        m_background = nullptr;
+    }
     m_groups.clear();
     m_cells.clear();
     m_thumbs.clear();
@@ -572,13 +634,27 @@ void TaskView::Render()
     HBITMAP bmp = CreateCompatibleBitmap(screen, w, h);
     HBITMAP old = static_cast<HBITMAP>(SelectObject(dc, bmp));
 
+    // Blurred desktop snapshot as the backdrop (fall back to flat dark).
+    if (m_background)
+    {
+        HDC bgdc = CreateCompatibleDC(screen);
+        HBITMAP oldbg = static_cast<HBITMAP>(SelectObject(bgdc, m_background));
+        BitBlt(dc, 0, 0, w, h, bgdc, 0, 0, SRCCOPY);
+        SelectObject(bgdc, oldbg);
+        DeleteDC(bgdc);
+    }
+    else
+    {
+        HBRUSH fill = CreateSolidBrush(RGB(22, 22, 26));
+        RECT full{ 0, 0, w, h };
+        FillRect(dc, &full, fill);
+        DeleteObject(fill);
+    }
+
     {
         Graphics g(dc);
         g.SetSmoothingMode(SmoothingModeAntiAlias);
         g.SetTextRenderingHint(TextRenderingHintClearTypeGridFit);
-
-        SolidBrush bg(Color(255, 22, 22, 26));
-        g.FillRectangle(&bg, 0, 0, w, h);
 
         FontFamily fam(L"Segoe UI");
         Font nameFont(&fam, 13, FontStyleBold, UnitPixel);

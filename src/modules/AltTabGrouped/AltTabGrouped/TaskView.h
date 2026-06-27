@@ -58,6 +58,7 @@ private:
     LRESULT WndProc(HWND, UINT, WPARAM, LPARAM);
 
     void CreateOverlayWindow(); // (re)create on the active desktop
+    void CaptureBlurredBackground(); // snapshot the desktop, blur + darken it
     void Open();
     void BuildModel();
     void LayoutGroups();
@@ -94,6 +95,7 @@ private:
 
     RECT m_monitor{};
     int m_gridBottom = 0;
+    HBITMAP m_background = nullptr; // blurred desktop snapshot drawn behind the grid
 
     std::vector<AppGroup> m_groups;
     std::vector<Cell> m_cells;
