@@ -476,11 +476,119 @@ std::vector<RECT> TaskView::FluidGrid(int count, RECT area, int titleBar) const
     return rects;
 }
 
+double TaskView::AspectOf(HWND hwnd)
+{
+    RECT wr{};
+    int ww = 0, wh = 0;
+    if (IsIconic(hwnd))
+    {
+        WINDOWPLACEMENT wp{ sizeof(wp) };
+        if (GetWindowPlacement(hwnd, &wp))
+        {
+            ww = wp.rcNormalPosition.right - wp.rcNormalPosition.left;
+            wh = wp.rcNormalPosition.bottom - wp.rcNormalPosition.top;
+        }
+    }
+    else if (GetWindowRect(hwnd, &wr))
+    {
+        ww = wr.right - wr.left;
+        wh = wr.bottom - wr.top;
+    }
+    double a = (ww > 0 && wh > 0) ? static_cast<double>(ww) / wh : 1.6;
+    return std::max(0.55, std::min(2.6, a)); // clamp so extreme windows stay sane
+}
+
+// Justified row layout: pick the largest uniform row height (body) such that the
+// whole set fits in `area`, packing tiles whose width follows their aspect.
+std::vector<RECT> TaskView::JustifiedLayout(const std::vector<double>& aspects, RECT area, int titleBar) const
+{
+    const int n = static_cast<int>(aspects.size());
+    std::vector<RECT> rects(n);
+    if (n == 0)
+    {
+        return rects;
+    }
+    const int aw = area.right - area.left;
+    const int ah = area.bottom - area.top;
+    const int gap = 18;
+
+    // For a target body height bh, build rows (each scaled to fill width) and
+    // return the total stacked height.
+    auto buildRows = [&](double bh, std::vector<std::vector<int>>& rows, std::vector<double>& rowH) {
+        rows.clear();
+        rowH.clear();
+        std::vector<int> cur;
+        for (int i = 0; i < n; ++i)
+        {
+            double sum = 0;
+            for (int idx : cur) sum += bh * aspects[idx];
+            const double w = bh * aspects[i];
+            const double withNew = cur.empty() ? w : sum + gap + w;
+            if (!cur.empty() && withNew > aw)
+            {
+                const double s = (aw - static_cast<int>(cur.size() - 1) * gap) / sum;
+                rows.push_back(cur);
+                rowH.push_back(bh * s + titleBar);
+                cur.clear();
+            }
+            cur.push_back(i);
+        }
+        if (!cur.empty())
+        {
+            double sum = 0;
+            for (int idx : cur) sum += bh * aspects[idx];
+            double s = (aw - static_cast<int>(cur.size() - 1) * gap) / sum;
+            if (s > 1.0) s = 1.0; // don't blow up a short final row
+            rows.push_back(cur);
+            rowH.push_back(bh * s + titleBar);
+        }
+        double total = gap * (static_cast<int>(rows.size()) - 1);
+        for (double r : rowH) total += r;
+        return total;
+    };
+
+    double lo = 24, hi = ah;
+    for (int it = 0; it < 40; ++it)
+    {
+        const double mid = (lo + hi) / 2;
+        std::vector<std::vector<int>> rows;
+        std::vector<double> rowH;
+        (buildRows(mid, rows, rowH) <= ah) ? lo = mid : hi = mid;
+    }
+
+    std::vector<std::vector<int>> rows;
+    std::vector<double> rowH;
+    const double totalH = buildRows(lo, rows, rowH);
+    int y = area.top + std::max(0, static_cast<int>((ah - totalH) / 2));
+    for (size_t r = 0; r < rows.size(); ++r)
+    {
+        const double bodyH = rowH[r] - titleBar;
+        double sumW = 0;
+        for (int idx : rows[r]) sumW += bodyH * aspects[idx];
+        const double rowWidth = sumW + gap * (static_cast<int>(rows[r].size()) - 1);
+        int x = area.left + std::max(0, static_cast<int>((aw - rowWidth) / 2));
+        for (int idx : rows[r])
+        {
+            const int wt = static_cast<int>(bodyH * aspects[idx]);
+            rects[idx] = RECT{ x, y, x + wt, y + static_cast<int>(rowH[r]) };
+            x += wt + gap;
+        }
+        y += static_cast<int>(rowH[r]) + gap;
+    }
+    return rects;
+}
+
 void TaskView::LayoutGroups()
 {
     const int mw = m_monitor.right - m_monitor.left;
     RECT area{ Margin, GridTop, mw - Margin, m_gridBottom };
-    auto rects = FluidGrid(static_cast<int>(m_cells.size()), area, TitleBar);
+    std::vector<double> aspects;
+    aspects.reserve(m_cells.size());
+    for (const auto& c : m_cells)
+    {
+        aspects.push_back(AspectOf(m_groups[c.group].windows.front().hwnd));
+    }
+    auto rects = JustifiedLayout(aspects, area, TitleBar);
     for (size_t i = 0; i < m_cells.size() && i < rects.size(); ++i)
     {
         m_cells[i].rect = rects[i];
@@ -506,8 +614,15 @@ void TaskView::LayoutExpanded()
     const int insetX = (grid.right - grid.left) / 10;
     const int insetY = (grid.bottom - grid.top) / 12;
     m_expandArea = { grid.left + insetX, grid.top + insetY, grid.right - insetX, grid.bottom - insetY };
-    const int n = (m_expandedGroup >= 0) ? static_cast<int>(m_groups[m_expandedGroup].windows.size()) : 0;
-    m_subRects = FluidGrid(n, m_expandArea, TitleBar);
+    std::vector<double> aspects;
+    if (m_expandedGroup >= 0)
+    {
+        for (const auto& win : m_groups[m_expandedGroup].windows)
+        {
+            aspects.push_back(AspectOf(win.hwnd));
+        }
+    }
+    m_subRects = JustifiedLayout(aspects, m_expandArea, TitleBar);
 }
 
 RECT TaskView::CellBody(const RECT& front) const
@@ -865,7 +980,14 @@ void TaskView::Render()
             g.SetClip(&clip);
             if (d.wallpaper)
             {
-                g.DrawImage(d.wallpaper.get(), r.left, r.top, DeskW, DeskH);
+                // Cover-fit (crop to fill) so the wallpaper keeps its aspect ratio.
+                const double iw = d.wallpaper->GetWidth(), ih = d.wallpaper->GetHeight();
+                if (iw > 0 && ih > 0)
+                {
+                    const double s = std::max(DeskW / iw, DeskH / ih);
+                    const int dw = static_cast<int>(iw * s), dh = static_cast<int>(ih * s);
+                    g.DrawImage(d.wallpaper.get(), r.left + (DeskW - dw) / 2, r.top + (DeskH - dh) / 2, dw, dh);
+                }
                 SolidBrush shade(Color(70, 0, 0, 0));
                 g.FillRectangle(&shade, r.left, r.top, DeskW, DeskH);
             }

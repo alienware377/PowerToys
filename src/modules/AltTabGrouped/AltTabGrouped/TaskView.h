@@ -72,6 +72,10 @@ private:
     // Fit `count` tiles of body aspect into `area`, returning per-tile rects
     // (rows centered). Never overflows: shrinks tiles until everything fits.
     std::vector<RECT> FluidGrid(int count, RECT area, int titleBar) const;
+    // Like the native Task View: rows of uniform height, each tile's width set by
+    // its window aspect ratio (so thumbnails are never stretched), scaled to fill.
+    std::vector<RECT> JustifiedLayout(const std::vector<double>& aspects, RECT area, int titleBar) const;
+    static double AspectOf(HWND hwnd);
 
     RECT CellBody(const RECT& cell) const;
 
