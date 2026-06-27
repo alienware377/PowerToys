@@ -147,8 +147,10 @@ void TaskView::CreateOverlayWindow()
     }
 }
 
-// Build a blurred + darkened copy of the desktop wallpaper to use as an
-// acrylic-style backdrop behind the grid (and behind the tile title bars).
+// Build a blurred + acrylic-flattened copy of the desktop wallpaper to use as an
+// acrylic backdrop behind the grid (and behind the tile title bars). Uses a true
+// GDI+ Gaussian blur (smooth, never blocky) with a radius that scales with the
+// screen size, so the blur looks the same on 1080p and 4K.
 void TaskView::CaptureBlurredBackground()
 {
     if (m_background)
@@ -163,62 +165,50 @@ void TaskView::CaptureBlurredBackground()
         return;
     }
 
-    HDC screen = GetDC(nullptr);
-    HDC mem = CreateCompatibleDC(screen);
-    HBITMAP full = CreateCompatibleBitmap(screen, mw, mh);
-    HBITMAP oldFull = static_cast<HBITMAP>(SelectObject(mem, full));
-
-    // Paint the wallpaper (cover-fit) over a dark base. Drawing it ourselves at a
-    // known size avoids the DPI-virtualization mismatch that a screen capture hit.
+    // Render the wallpaper into a 32-bit bitmap. We blur at a reduced resolution
+    // for speed; because a Gaussian blur is smooth, upscaling it stays smooth.
+    const int down = 2;
+    const int ww = std::max(1, mw / down);
+    const int wh = std::max(1, mh / down);
+    Bitmap work(ww, wh, PixelFormat32bppPARGB);
     {
-        HBRUSH base = CreateSolidBrush(RGB(20, 20, 24));
-        RECT r{ 0, 0, mw, mh };
-        FillRect(mem, &r, base);
-        DeleteObject(base);
-    }
-    wchar_t wpPath[MAX_PATH] = {};
-    if (SystemParametersInfoW(SPI_GETDESKWALLPAPER, MAX_PATH, wpPath, 0) && wpPath[0])
-    {
-        auto* wp = Image::FromFile(wpPath);
-        if (wp && wp->GetLastStatus() == Ok)
+        Graphics g(&work);
+        g.SetInterpolationMode(InterpolationModeHighQualityBicubic);
+        SolidBrush base(Color(255, 20, 20, 24));
+        g.FillRectangle(&base, 0, 0, ww, wh);
+        wchar_t wpPath[MAX_PATH] = {};
+        if (SystemParametersInfoW(SPI_GETDESKWALLPAPER, MAX_PATH, wpPath, 0) && wpPath[0])
         {
-            Graphics g(mem);
-            g.SetInterpolationMode(InterpolationModeHighQualityBicubic);
-            const double iw = wp->GetWidth(), ih = wp->GetHeight();
-            if (iw > 0 && ih > 0)
+            auto* wp = Image::FromFile(wpPath);
+            if (wp && wp->GetLastStatus() == Ok)
             {
-                const double scale = std::max(mw / iw, mh / ih);
-                const int dw = static_cast<int>(iw * scale), dh = static_cast<int>(ih * scale);
-                g.DrawImage(wp, (mw - dw) / 2, (mh - dh) / 2, dw, dh);
+                const double iw = wp->GetWidth(), ih = wp->GetHeight();
+                if (iw > 0 && ih > 0)
+                {
+                    const double scale = std::max(ww / iw, wh / ih);
+                    const int dw = static_cast<int>(iw * scale), dh = static_cast<int>(ih * scale);
+                    g.DrawImage(wp, (ww - dw) / 2, (wh - dh) / 2, dw, dh);
+                }
             }
+            delete wp;
         }
-        delete wp;
     }
 
-    const int sw = std::max(1, mw / 14);
-    const int sh = std::max(1, mh / 14);
-    HDC lowDc = CreateCompatibleDC(screen); // 'small' is a Windows macro, avoid it
-    HBITMAP lowBmp = CreateCompatibleBitmap(screen, sw, sh);
-    HBITMAP oldLow = static_cast<HBITMAP>(SelectObject(lowDc, lowBmp));
-    SetStretchBltMode(lowDc, HALFTONE);
-    SetStretchBltMode(mem, HALFTONE);
+    // Fluid blur radius: ~4% of screen width, expressed at the work resolution.
+    REAL radius = static_cast<REAL>(mw) * 0.04f / down;
+    radius = std::max<REAL>(2.0f, std::min<REAL>(254.0f, radius));
+    Blur blur;
+    BlurParams bp{ radius, FALSE };
+    blur.SetParameters(&bp);
+    work.ApplyEffect(&blur, nullptr);
 
-    // Two down/up cycles produce a soft, even blur cheaply.
-    for (int pass = 0; pass < 2; ++pass)
+    // Acrylic luminosity flatten (reduce contrast: lift darks, crush highlights)
+    // while upscaling back to full size.
+    Bitmap finalBmp(mw, mh, PixelFormat32bppPARGB);
     {
-        StretchBlt(lowDc, 0, 0, sw, sh, mem, 0, 0, mw, mh, SRCCOPY);
-        StretchBlt(mem, 0, 0, mw, mh, lowDc, 0, 0, sw, sh, SRCCOPY);
-    }
-
-    // Acrylic-style luminosity flatten: lift the darkest parts and crush the
-    // lightest parts toward a midtone by reducing contrast (out = in*s + off, so
-    // the floor is `off` and the cap is `s+off`).
-    {
-        SelectObject(mem, oldFull); // detach so GDI+ can safely read 'full'
-        Bitmap snapshot(full, static_cast<HPALETTE>(nullptr));
-        SelectObject(mem, full); // reattach as the draw target
-        const REAL s = 0.55f;
-        const REAL off = 0.14f;
+        Graphics g(&finalBmp);
+        g.SetInterpolationMode(InterpolationModeHighQualityBilinear);
+        const REAL s = 0.55f, off = 0.14f;
         ColorMatrix cm = {
             s, 0, 0, 0, 0,
             0, s, 0, 0, 0,
@@ -228,19 +218,11 @@ void TaskView::CaptureBlurredBackground()
         };
         ImageAttributes ia;
         ia.SetColorMatrix(&cm);
-        Graphics g(mem);
-        g.SetInterpolationMode(InterpolationModeNearestNeighbor);
-        RectF dst(0, 0, static_cast<REAL>(mw), static_cast<REAL>(mh));
-        g.DrawImage(&snapshot, dst, 0, 0, static_cast<REAL>(mw), static_cast<REAL>(mh), UnitPixel, &ia);
+        g.DrawImage(&work, RectF(0, 0, static_cast<REAL>(mw), static_cast<REAL>(mh)),
+                    0, 0, static_cast<REAL>(ww), static_cast<REAL>(wh), UnitPixel, &ia);
     }
 
-    SelectObject(lowDc, oldLow);
-    SelectObject(mem, oldFull);
-    DeleteObject(lowBmp);
-    DeleteDC(lowDc);
-    DeleteDC(mem);
-    ReleaseDC(nullptr, screen);
-    m_background = full;
+    finalBmp.GetHBITMAP(Color(255, 0, 0, 0), &m_background);
 }
 
 LRESULT CALLBACK TaskView::WndProcStatic(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)

@@ -10,7 +10,8 @@
 #include <algorithm>
 using std::max;
 using std::min;
-#include <gdiplus.h>
+#include <gdiplus.h> // GDIPVER=0x0110 is set project-wide to enable 1.1 effects
+#include <gdipluseffects.h>
 
 #include <winrt/base.h>
 #include <winrt/Windows.Foundation.h>
