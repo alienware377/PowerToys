@@ -208,11 +208,15 @@ void TaskView::CaptureBlurredBackground()
     {
         Graphics g(&finalBmp);
         g.SetInterpolationMode(InterpolationModeHighQualityBilinear);
-        const REAL s = 0.55f, off = 0.14f;
+        // Combined: boost saturation (sat), then flatten contrast (scale cs, lift
+        // off). The saturation block is the luminance-preserving mix, scaled by cs.
+        const REAL cs = 0.55f, off = 0.14f, sat = 1.5f;
+        const REAL lr = 0.2126f, lg = 0.7152f, lb = 0.0722f;
+        const REAL ar = (1.0f - sat) * lr, ag = (1.0f - sat) * lg, ab = (1.0f - sat) * lb;
         ColorMatrix cm = {
-            s, 0, 0, 0, 0,
-            0, s, 0, 0, 0,
-            0, 0, s, 0, 0,
+            (ar + sat) * cs, ar * cs, ar * cs, 0, 0,
+            ag * cs, (ag + sat) * cs, ag * cs, 0, 0,
+            ab * cs, ab * cs, (ab + sat) * cs, 0, 0,
             0, 0, 0, 1, 0,
             off, off, off, 0, 1
         };
