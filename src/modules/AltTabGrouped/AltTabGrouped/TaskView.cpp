@@ -61,6 +61,32 @@ namespace
         g.DrawPath(&pen, &p);
     }
 
+    // Rounded top corners, square bottom (for tile title bars).
+    void FillRoundTop(Graphics& g, Brush& b, int x, int y, int w, int h, int r)
+    {
+        if (w < 2 * r) r = w / 2;
+        if (h < r) r = h;
+        GraphicsPath p;
+        p.AddArc(x, y, r, r, 180, 90);
+        p.AddArc(x + w - r, y, r, r, 270, 90);
+        p.AddLine(static_cast<REAL>(x + w), static_cast<REAL>(y + h), static_cast<REAL>(x), static_cast<REAL>(y + h));
+        p.CloseFigure();
+        g.FillPath(&b, &p);
+    }
+
+    // Square top, rounded bottom corners (for tile bodies under the title bar).
+    void FillRoundBottom(Graphics& g, Brush& b, int x, int y, int w, int h, int r)
+    {
+        if (w < 2 * r) r = w / 2;
+        if (h < r) r = h;
+        GraphicsPath p;
+        p.AddLine(static_cast<REAL>(x), static_cast<REAL>(y), static_cast<REAL>(x + w), static_cast<REAL>(y));
+        p.AddArc(x + w - r, y + h - r, r, r, 0, 90);
+        p.AddArc(x, y + h - r, r, r, 90, 90);
+        p.CloseFigure();
+        g.FillPath(&b, &p);
+    }
+
     int NearestInDirection(const std::vector<RECT>& rects, int cur, int dx, int dy)
     {
         if (cur < 0 || cur >= static_cast<int>(rects.size()))
@@ -121,9 +147,8 @@ void TaskView::CreateOverlayWindow()
     }
 }
 
-// Capture the desktop, blur it (downscale/upscale a couple of times), and darken
-// it. This static snapshot serves as an acrylic-style backdrop behind the grid;
-// it never updates while the (transient) overlay is open, which is unnoticeable.
+// Build a blurred + darkened copy of the desktop wallpaper to use as an
+// acrylic-style backdrop behind the grid (and behind the tile title bars).
 void TaskView::CaptureBlurredBackground()
 {
     if (m_background)
@@ -142,7 +167,33 @@ void TaskView::CaptureBlurredBackground()
     HDC mem = CreateCompatibleDC(screen);
     HBITMAP full = CreateCompatibleBitmap(screen, mw, mh);
     HBITMAP oldFull = static_cast<HBITMAP>(SelectObject(mem, full));
-    BitBlt(mem, 0, 0, mw, mh, screen, m_monitor.left, m_monitor.top, SRCCOPY | CAPTUREBLT);
+
+    // Paint the wallpaper (cover-fit) over a dark base. Drawing it ourselves at a
+    // known size avoids the DPI-virtualization mismatch that a screen capture hit.
+    {
+        HBRUSH base = CreateSolidBrush(RGB(20, 20, 24));
+        RECT r{ 0, 0, mw, mh };
+        FillRect(mem, &r, base);
+        DeleteObject(base);
+    }
+    wchar_t wpPath[MAX_PATH] = {};
+    if (SystemParametersInfoW(SPI_GETDESKWALLPAPER, MAX_PATH, wpPath, 0) && wpPath[0])
+    {
+        auto* wp = Image::FromFile(wpPath);
+        if (wp && wp->GetLastStatus() == Ok)
+        {
+            Graphics g(mem);
+            g.SetInterpolationMode(InterpolationModeHighQualityBicubic);
+            const double iw = wp->GetWidth(), ih = wp->GetHeight();
+            if (iw > 0 && ih > 0)
+            {
+                const double scale = std::max(mw / iw, mh / ih);
+                const int dw = static_cast<int>(iw * scale), dh = static_cast<int>(ih * scale);
+                g.DrawImage(wp, (mw - dw) / 2, (mh - dh) / 2, dw, dh);
+            }
+        }
+        delete wp;
+    }
 
     const int sw = std::max(1, mw / 14);
     const int sh = std::max(1, mh / 14);
@@ -159,11 +210,28 @@ void TaskView::CaptureBlurredBackground()
         StretchBlt(mem, 0, 0, mw, mh, lowDc, 0, 0, sw, sh, SRCCOPY);
     }
 
-    // Darken so the grid and white text stay readable.
+    // Acrylic-style luminosity flatten: lift the darkest parts and crush the
+    // lightest parts toward a midtone by reducing contrast (out = in*s + off, so
+    // the floor is `off` and the cap is `s+off`).
     {
+        SelectObject(mem, oldFull); // detach so GDI+ can safely read 'full'
+        Bitmap snapshot(full, static_cast<HPALETTE>(nullptr));
+        SelectObject(mem, full); // reattach as the draw target
+        const REAL s = 0.55f;
+        const REAL off = 0.14f;
+        ColorMatrix cm = {
+            s, 0, 0, 0, 0,
+            0, s, 0, 0, 0,
+            0, 0, s, 0, 0,
+            0, 0, 0, 1, 0,
+            off, off, off, 0, 1
+        };
+        ImageAttributes ia;
+        ia.SetColorMatrix(&cm);
         Graphics g(mem);
-        SolidBrush dark(Color(100, 10, 10, 14));
-        g.FillRectangle(&dark, 0, 0, mw, mh);
+        g.SetInterpolationMode(InterpolationModeNearestNeighbor);
+        RectF dst(0, 0, static_cast<REAL>(mw), static_cast<REAL>(mh));
+        g.DrawImage(&snapshot, dst, 0, 0, static_cast<REAL>(mw), static_cast<REAL>(mh), UnitPixel, &ia);
     }
 
     SelectObject(lowDc, oldLow);
@@ -634,12 +702,16 @@ void TaskView::Render()
     HBITMAP bmp = CreateCompatibleBitmap(screen, w, h);
     HBITMAP old = static_cast<HBITMAP>(SelectObject(dc, bmp));
 
-    // Blurred desktop snapshot as the backdrop (fall back to flat dark).
+    // Blurred wallpaper as the backdrop, stretched to the client rect so it fills
+    // exactly regardless of any DPI scaling (fall back to flat dark).
     if (m_background)
     {
+        const int bw = m_monitor.right - m_monitor.left;
+        const int bh = m_monitor.bottom - m_monitor.top;
         HDC bgdc = CreateCompatibleDC(screen);
         HBITMAP oldbg = static_cast<HBITMAP>(SelectObject(bgdc, m_background));
-        BitBlt(dc, 0, 0, w, h, bgdc, 0, 0, SRCCOPY);
+        SetStretchBltMode(dc, HALFTONE);
+        StretchBlt(dc, 0, 0, w, h, bgdc, 0, 0, bw, bh, SRCCOPY);
         SelectObject(bgdc, oldbg);
         DeleteDC(bgdc);
     }
@@ -656,15 +728,18 @@ void TaskView::Render()
         g.SetSmoothingMode(SmoothingModeAntiAlias);
         g.SetTextRenderingHint(TextRenderingHintClearTypeGridFit);
 
+        // Title font: match the native Task View (Segoe UI Variable Text, regular),
+        // falling back to Segoe UI if the variable family isn't present.
         FontFamily fam(L"Segoe UI");
-        Font nameFont(&fam, 13, FontStyleBold, UnitPixel);
-        Font titleFont(&fam, 12, FontStyleRegular, UnitPixel);
-        Font deskFont(&fam, 13, FontStyleRegular, UnitPixel);
-        SolidBrush white(Color(255, 240, 240, 240));
+        FontFamily famVar(L"Segoe UI Variable Text");
+        const FontFamily* titleFam = (famVar.GetLastStatus() == Ok) ? &famVar : &fam;
+        Font nameFont(titleFam, 14, FontStyleRegular, UnitPixel);
+        Font titleFont(titleFam, 13, FontStyleRegular, UnitPixel);
+        Font deskFont(titleFam, 13, FontStyleRegular, UnitPixel);
+        SolidBrush white(Color(255, 245, 245, 245));
         SolidBrush dim(Color(255, 170, 170, 178));
         SolidBrush cardBack(Color(255, 46, 46, 54));
         SolidBrush cardBack2(Color(255, 38, 38, 45));
-        SolidBrush titleBg(Color(255, 52, 52, 62));
         SolidBrush bodyBg(Color(255, 30, 30, 36));
         SolidBrush badge(Color(255, 0, 120, 215));
         SolidBrush closeHot(Color(255, 200, 60, 60));
@@ -679,6 +754,35 @@ void TaskView::Render()
         center.SetLineAlignment(StringAlignmentCenter);
         center.SetTrimming(StringTrimmingEllipsisCharacter);
         center.SetFormatFlags(StringFormatFlagsNoWrap);
+
+        // Title bars are a darkened slice of the same blurred wallpaper, like the
+        // native Task View. Sample it from the backdrop bitmap (scaled to client).
+        std::unique_ptr<Bitmap> bgBmp;
+        if (m_background)
+        {
+            bgBmp.reset(Bitmap::FromHBITMAP(m_background, nullptr));
+        }
+        const int bgW = m_monitor.right - m_monitor.left;
+        const int bgH = m_monitor.bottom - m_monitor.top;
+        auto acrylicTitle = [&](int x, int y, int tw) {
+            int r = 9;
+            if (tw < 2 * r) r = tw / 2;
+            GraphicsPath clip;
+            clip.AddArc(x, y, r, r, 180, 90);
+            clip.AddArc(x + tw - r, y, r, r, 270, 90);
+            clip.AddLine(static_cast<REAL>(x + tw), static_cast<REAL>(y + TitleBar), static_cast<REAL>(x), static_cast<REAL>(y + TitleBar));
+            clip.CloseFigure();
+            g.SetClip(&clip);
+            if (bgBmp && w > 0 && h > 0)
+            {
+                const REAL sx = static_cast<REAL>(bgW) / w, sy = static_cast<REAL>(bgH) / h;
+                g.DrawImage(bgBmp.get(), RectF(static_cast<REAL>(x), static_cast<REAL>(y), static_cast<REAL>(tw), static_cast<REAL>(TitleBar)),
+                            x * sx, y * sy, tw * sx, TitleBar * sy, UnitPixel);
+            }
+            SolidBrush tint(Color(140, 14, 14, 20));
+            g.FillRectangle(&tint, x, y, tw, TitleBar);
+            g.ResetClip();
+        };
 
         // ---- Group stacks ----
         for (int i = 0; i < static_cast<int>(m_cells.size()); ++i)
@@ -699,10 +803,9 @@ void TaskView::Render()
                 FillRound(g, (k == 1 ? cardBack : cardBack2), bx, by, fw, fh, 9);
             }
 
-            // Front card: title bar + body placeholder (DWM draws the thumbnail).
-            FillRound(g, bodyBg, front.left, front.top, fw, fh, 9);
-            FillRound(g, titleBg, front.left, front.top, fw, TitleBar, 9);
-            g.FillRectangle(&titleBg, front.left, front.top + TitleBar - 9, fw, 9);
+            // Body placeholder (DWM draws the thumbnail over it); acrylic title bar.
+            FillRoundBottom(g, bodyBg, front.left, front.top + TitleBar, fw, fh - TitleBar, 9);
+            acrylicTitle(front.left, front.top, fw);
 
             if (grp.icon)
             {
@@ -741,9 +844,8 @@ void TaskView::Render()
                 const int tw = r.right - r.left, th = r.bottom - r.top;
                 const WindowInfo& win = m_groups[m_expandedGroup].windows[i];
 
-                FillRound(g, bodyBg, r.left, r.top, tw, th, 9);
-                FillRound(g, titleBg, r.left, r.top, tw, TitleBar, 9);
-                g.FillRectangle(&titleBg, r.left, r.top + TitleBar - 9, tw, 9);
+                FillRoundBottom(g, bodyBg, r.left, r.top + TitleBar, tw, th - TitleBar, 9);
+                acrylicTitle(r.left, r.top, tw);
                 if (win.icon)
                 {
                     DrawIconEx(dc, r.left + 8, r.top + (TitleBar - 18) / 2, win.icon, 18, 18, 0, nullptr, DI_NORMAL);
